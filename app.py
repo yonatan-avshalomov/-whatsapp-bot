@@ -2,8 +2,7 @@ from flask import Flask, request
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 import google.generativeai as genai
-import gspread
-from google.oauth2.service_account import Credentials
+import requests
 import os
 from dotenv import load_dotenv
 
@@ -24,11 +23,11 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 
 def get_sheets_data():
     try:
-        scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-        creds = Credentials.from_service_account_file("google_credentials.json", scopes=scopes)
-        client = gspread.authorize(creds)
-        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
-        return sheet.get_all_records()
+        import requests
+        url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv"
+        response = requests.get(url)
+        response.encoding = "utf-8"
+        return response.text[:3000]
     except Exception as e:
         return f"שגיאה בטעינת נתוני החנויות: {str(e)}"
 
