@@ -1,7 +1,6 @@
 from flask import Flask, request
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
-import google.generativeai as genai
 import requests
 import os
 from dotenv import load_dotenv
@@ -17,24 +16,22 @@ MY_WHATSAPP_NUMBER = os.getenv("MY_WHATSAPP_NUMBER")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
-
 
 def get_sheets_data():
     try:
-        import requests
         url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv"
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.encoding = "utf-8"
         return response.text[:3000]
     except Exception as e:
-        return f"שגיאה בטעינת נתוני החנויות: {str(e)}"
+        return f"שגיאה בטעינת נתונים: {str(e)}"
 
 
 def ask_gemini(user_message, sheets_data):
-    prompt = f"""אתה עוזר אישי לניהול רשת חנויות.
-ענה בעברית בלבד, בצורה קצרה ומקצועית כמו הודעת וואטסאפ.
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        prompt = f"""אתה עוזר אישי לניהול רשת חנויות.
+ענה בעברית בלבד, בצורה קצרה ומקצועית.
 השתמש בבוליטים כשרלוונטי. מקסימום 300 מילים.
 
 נתוני החנויות:
@@ -42,8 +39,14 @@ def ask_gemini(user_message, sheets_data):
 
 שאלת המשתמש: {user_message}"""
 
-    response = model.generate_content(prompt)
-    return response.text
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}]
+        }
+        response = requests.post(url, json=body, timeout=15)
+        data = response.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        return f"שגיאה: {str(e)}"
 
 
 @app.route("/webhook", methods=["POST"])
