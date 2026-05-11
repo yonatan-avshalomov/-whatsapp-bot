@@ -44,9 +44,14 @@ def ask_gemini(user_message, sheets_data):
         }
         response = requests.post(url, json=body, timeout=15)
         data = response.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        if "candidates" in data:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        elif "error" in data:
+            return f"שגיאת API: {data['error'].get('message', 'שגיאה לא ידועה')}"
+        else:
+            return "מצטער, לא הצלחתי לעבד את הבקשה. נסה שוב."
     except Exception as e:
-        return f"שגיאה: {str(e)}"
+        return f"שגיאה טכנית: {str(e)}"
 
 
 @app.route("/webhook", methods=["POST"])
