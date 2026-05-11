@@ -46,10 +46,8 @@ def ask_gemini(user_message, sheets_data):
         data = response.json()
         if "candidates" in data:
             return data["candidates"][0]["content"]["parts"][0]["text"]
-        elif "error" in data:
-            return f"שגיאת API: {data['error'].get('message', 'שגיאה לא ידועה')}"
         else:
-            return "מצטער, לא הצלחתי לעבד את הבקשה. נסה שוב."
+            return f"תשובת API: {str(data)[:200]}"
     except Exception as e:
         return f"שגיאה טכנית: {str(e)}"
 
