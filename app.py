@@ -29,7 +29,7 @@ def get_sheets_data():
 
 def ask_gemini(user_message, sheets_data):
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
         prompt = f"""אתה עוזר אישי לניהול רשת חנויות.
 ענה בעברית בלבד, בצורה קצרה ומקצועית.
 השתמש בבוליטים כשרלוונטי. מקסימום 300 מילים.
