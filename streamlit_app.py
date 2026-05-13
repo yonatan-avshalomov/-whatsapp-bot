@@ -10,10 +10,10 @@ load_dotenv()
 
 # תמיכה גם ב-Streamlit Cloud secrets וגם ב-.env מקומי
 try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
     GOOGLE_SHEET_ID = st.secrets["GOOGLE_SHEET_ID"]
 except Exception:
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 
 # ── הגדרות עמוד ──────────────────────────────────────────
@@ -113,9 +113,9 @@ def build_context(user_msg, stores, deliveries):
     return "\n".join(lines)[:10000]
 
 
-def ask_gemini(user_msg, context_text, chat_history):
+def ask_groq(user_msg, context_text, chat_history):
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        url = "https://api.groq.com/openai/v1/chat/completions"
         today = datetime.now().strftime("%d/%m/%Y")
 
         system_prompt = f"""אתה עוזר אישי חכם לניהול רשת חנויות בישראל בשם "ניהול חנויות".
@@ -131,26 +131,29 @@ def ask_gemini(user_msg, context_text, chat_history):
 נתוני הרשת:
 {context_text}"""
 
-        # בנה היסטוריית שיחה
-        contents = [{"role": "user", "parts": [{"text": system_prompt}]},
-                    {"role": "model", "parts": [{"text": "הבנתי, אני מוכן לעזור בניהול החנויות."}]}]
+        messages = [{"role": "system", "content": system_prompt}]
 
-        for msg in chat_history[-6:]:  # 6 הודעות אחרונות בלבד
-            role = "user" if msg["role"] == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+        for msg in chat_history[-6:]:
+            messages.append({"role": msg["role"], "content": msg["content"]})
 
-        contents.append({"role": "user", "parts": [{"text": user_msg}]})
+        messages.append({"role": "user", "content": user_msg})
 
-        body = {"contents": contents}
-        response = requests.post(url, json=body, timeout=20)
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        body = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": messages,
+            "max_tokens": 500
+        }
+
+        response = requests.post(url, json=body, headers=headers, timeout=20)
         data = response.json()
 
-        if "candidates" in data:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+        if "choices" in data:
+            return data["choices"][0]["message"]["content"]
         else:
-            error = data.get("error", {})
-            if error.get("code") == 429:
-                return "⏳ הגעת למגבלת השימוש הזמנית. נסה שוב בעוד כמה דקות."
             return f"שגיאה: {str(data)[:200]}"
     except Exception as e:
         return f"שגיאה: {str(e)}"
@@ -190,7 +193,7 @@ if prompt := st.chat_input("שאל על החנויות שלך..."):
                 deliveries = get_senzey_deliveries()
 
             context_text = build_context(prompt, stores, deliveries)
-            reply = ask_gemini(prompt, context_text, st.session_state.messages[:-1])
+            reply = ask_groq(prompt, context_text, st.session_state.messages[:-1])
 
         st.markdown(reply)
 
