@@ -1,4 +1,5 @@
-flask
-twilio
+streamlit
 requests
 python-dotenv
+playwright
+beautifulsoup4
