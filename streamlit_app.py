@@ -59,11 +59,19 @@ def get_sheets_stores():
         return []
 
 
-@st.cache_data(ttl=600)  # cache למשך 10 דקות
+@st.cache_data(ttl=3600)  # cache שעה
 def get_senzey_deliveries():
     try:
-        from senzey_scraper import get_deliveries
-        return get_deliveries()
+        url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/senzey_data.csv"
+        response = requests.get(url, timeout=10)
+        response.encoding = "utf-8"
+        deliveries = []
+        reader = csv.reader(io.StringIO(response.text))
+        next(reader, None)
+        for row in reader:
+            if len(row) >= 2:
+                deliveries.append({"date": row[0], "store": row[1]})
+        return deliveries
     except Exception as e:
         return []
 
