@@ -67,10 +67,17 @@ def get_senzey_deliveries():
         response.encoding = "utf-8"
         deliveries = []
         reader = csv.reader(io.StringIO(response.text))
-        next(reader, None)
+        header = next(reader, None)
+        # Support both old format (date, store) and new format (date, customer, branch)
+        has_branch = header and len(header) >= 3
         for row in reader:
             if len(row) >= 2:
-                deliveries.append({"date": row[0], "store": row[1]})
+                entry = {
+                    "date": row[0],
+                    "customer": row[1],
+                    "branch": row[2].strip() if has_branch and len(row) >= 3 else row[1]
+                }
+                deliveries.append(entry)
         return deliveries
     except Exception as e:
         return []
@@ -81,8 +88,9 @@ def enrich_stores(stores, deliveries):
         name_words = [w for w in store["name"].split() if len(w) > 2]
         best_date = None
         for d in deliveries:
-            d_store = d.get("store", "")
-            if any(w in d_store for w in name_words):
+            # Prefer branch name (specific store), fall back to customer name
+            match_text = d.get("branch") or d.get("store", "")
+            if any(w in match_text for w in name_words):
                 if best_date is None or d["date"] > best_date:
                     best_date = d["date"]
         store["last_delivery"] = best_date or store["last_visit"] or "לא ידוע"
@@ -117,7 +125,8 @@ def build_context(user_msg, stores, deliveries):
     if deliveries:
         lines.append(f"\n\nתעודות משלוח אחרונות ({len(deliveries)}):")
         for d in deliveries[:15]:
-            lines.append(f"• {d['date']} — {d['store'][:40]}")
+            branch = d.get("branch") or d.get("store", "")
+            lines.append(f"• {d['date']} — {branch[:40]}")
 
     return "\n".join(lines)[:10000]
 
