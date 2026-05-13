@@ -47,12 +47,12 @@ def get_sheets_stores():
         reader = csv.reader(io.StringIO(response.text))
         next(reader, None)
         for row in reader:
-            if len(row) >= 2 and row[1].strip():
+            if len(row) >= 5 and row[4].strip():
                 stores.append({
-                    "last_visit": row[0].strip() if len(row) > 0 else "",
-                    "name":       row[1].strip(),
-                    "address":    row[2].strip() if len(row) > 2 else "",
-                    "city":       row[3].strip() if len(row) > 3 else "",
+                    "last_visit": row[3].strip() if len(row) > 3 else "",
+                    "name":       row[4].strip(),
+                    "address":    row[5].strip() if len(row) > 5 else "",
+                    "city":       row[6].strip() if len(row) > 6 else "",
                 })
         return stores
     except Exception as e:
