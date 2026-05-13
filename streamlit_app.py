@@ -36,6 +36,25 @@ st.caption("עוזר אישי לניהול רשת החנויות שלך")
 
 # ── פונקציות נתונים ──────────────────────────────────────
 
+def normalize_store_name(name):
+    """תיקון שגיאות כתיב נפוצות בשמות חנויות."""
+    fixes = {
+        "ניצתץ":        "ניצת",
+        "ניצתהדובדבן":  "ניצת הדובדבן",
+        "הדבדובן":      "הדובדבן",
+        "הדובדבהן":     "הדובדבן",
+        "הדודבן":       "הדובדבן",
+        "ניצת הדודבן":  "ניצת הדובדבן",
+    }
+    for wrong, correct in fixes.items():
+        name = name.replace(wrong, correct)
+    # נרמול רווחים כפולים ומקפים
+    import re
+    name = re.sub(r"\s{2,}", " ", name).strip()
+    name = re.sub(r"\s*-\s*", " - ", name)
+    return name
+
+
 @st.cache_data(ttl=300)  # שמור cache למשך 5 דקות
 def get_sheets_stores():
     try:
@@ -44,15 +63,22 @@ def get_sheets_stores():
         response = requests.get(url, timeout=15, allow_redirects=True, headers=headers)
         response.encoding = "utf-8"
         stores = []
+        seen = set()  # מניעת כפילויות
         reader = csv.reader(io.StringIO(response.text))
         next(reader, None)
         for row in reader:
             if len(row) >= 5 and row[4].strip():
+                name = normalize_store_name(row[4].strip())
+                city = row[6].strip() if len(row) > 6 else ""
+                key  = (name, city)
+                if key in seen:
+                    continue  # דלג על כפילות
+                seen.add(key)
                 stores.append({
                     "last_visit": row[3].strip() if len(row) > 3 else "",
-                    "name":       row[4].strip(),
+                    "name":       name,
                     "address":    row[5].strip() if len(row) > 5 else "",
-                    "city":       row[6].strip() if len(row) > 6 else "",
+                    "city":       city,
                 })
         return stores
     except Exception as e:
