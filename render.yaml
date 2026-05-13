@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: niul-hanuyot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
