@@ -39,8 +39,9 @@ st.caption("עוזר אישי לניהול רשת החנויות שלך")
 @st.cache_data(ttl=300)  # שמור cache למשך 5 דקות
 def get_sheets_stores():
     try:
-        url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv"
-        response = requests.get(url, timeout=10)
+        url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/gviz/tq?tqx=out:csv"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, timeout=15, allow_redirects=True, headers=headers)
         response.encoding = "utf-8"
         stores = []
         reader = csv.reader(io.StringIO(response.text))
