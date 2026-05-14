@@ -67,11 +67,43 @@ def normalize_store_name(name):
 # ── טעינת נתונים ─────────────────────────────────────────
 @st.cache_data(ttl=300)
 def get_stores():
+    """
+    קורא חנויות מ-stores.csv (מסקריפר האתרים) — מקיף יותר.
+    אם לא זמין, נופל חזרה ל-Google Sheets.
+    """
+    stores, seen = [], set()
+
+    # ── ראשון: stores.csv מהרפו (ניצת + שילב + מכבי + פרטי) ──────────────
+    try:
+        url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/stores.csv"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            text = r.content.decode("utf-8-sig")
+            for row in csv.DictReader(io.StringIO(text)):
+                name = normalize_store_name(row.get("name", "").strip())
+                city = row.get("city", "").strip()
+                if not name:
+                    continue
+                key = (name, city)
+                if key not in seen:
+                    seen.add(key)
+                    stores.append({
+                        "name":    name,
+                        "city":    city,
+                        "address": row.get("address", "").strip(),
+                        "chain":   row.get("chain", "").strip(),
+                        "phone":   row.get("phone", "").strip(),
+                    })
+            if stores:
+                return stores
+    except Exception:
+        pass
+
+    # ── גיבוי: Google Sheets ────────────────────────────────────────────────
     try:
         url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQFvzEaqPb8mnyMwNo40WRFkBMYAnsnGWsnkLmfRZaW0saA92t3moVb9heglVartTfX0MQKOEXHRBF2/pub?output=csv"
         r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         r.encoding = "utf-8"
-        stores, seen = [], set()
         for row in csv.reader(io.StringIO(r.text)):
             if len(row) >= 5 and row[4].strip():
                 name = normalize_store_name(row[4].strip())
@@ -80,10 +112,12 @@ def get_stores():
                 if key not in seen:
                     seen.add(key)
                     stores.append({"name": name, "city": city,
-                                   "address": row[5].strip() if len(row) > 5 else ""})
-        return stores
-    except:
-        return []
+                                   "address": row[5].strip() if len(row) > 5 else "",
+                                   "chain": "", "phone": ""})
+    except Exception:
+        pass
+
+    return stores
 
 
 @st.cache_data(ttl=120)
