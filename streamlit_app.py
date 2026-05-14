@@ -395,13 +395,26 @@ def build_context(user_msg, stores, deliveries, notes, visits):
             chain = f"[{s.get('chain','')}] " if s.get('chain') else ""
             lines.append(f"• {chain}{s['name']} | {s['address']} | אחרון: {ld} | {d:.1f}ק\"מ")
     elif is_route_question(user_msg):
-        # מסלול יומי — ממוין מקרוב לרחוק
+        # מסלול יומי — מינימום 10 חנויות, ממוין מקרוב לרחוק
         sorted_stores = sort_stores_by_distance(stores)
-        lines.append(f"מסלול מהוד השרון — חנויות לפי מרחק (קרוב לרחוק):")
+
+        # סנן לפי אזור אם הוזכר בשאלה
+        area_stores = sorted_stores
+        for s in stores:
+            if s["city"] and s["city"] in user_msg:
+                area_stores = [x for x in sorted_stores if s["city"] in x.get("city","")]
+                break
+
+        # ודא מינימום 10 חנויות
+        if len(area_stores) < 10:
+            area_stores = sorted_stores
+
+        lines.append(f"מסלול יומי מהוד השרון — מינימום 10 חנויות (מקרוב לרחוק):")
+        lines.append(f"⚠️ חובה להציג לפחות 10 חנויות ביום")
         prev_city = None
-        for s in sorted_stores[:60]:
+        for s in area_stores[:80]:
             city = s.get("city", "")
-            dist = city_distance_from_home(city)
+            dist = store_distance_from_home(s)
             ld = last_delivery(s) or "—"
             if city != prev_city:
                 lines.append(f"\n📍 {city} (~{dist:.0f} ק\"מ):")
@@ -470,6 +483,7 @@ def ask_claude(user_msg, context_text, chat_history):
 ענה תמיד בעברית, קצר וברור. השתמש בבוליטים כשיש רשימות.
 תאריך היום: {today}
 בית המשתמש: הוד השרון — תמיד תציג מסלולים וחנויות מהקרוב לרחוק מהוד השרון.
+כלל מסלול יומי: מינימום 10 חנויות ביום — אם שואלים על מסלול תציג לפחות 10, ואפשר לקבץ ערים קרובות ביחד.
 
 ⛔ חוקים שאסור לעבור עליהם:
 1. השתמש אך ורק במידע שמופיע בין "--- נתונים ---" ו"--- סוף נתונים ---" למטה
