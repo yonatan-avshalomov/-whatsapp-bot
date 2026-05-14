@@ -32,17 +32,32 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; store-scraper/1.0)"}
 
 # ── עזרים ────────────────────────────────────────────────────────────────────
 
+NIZAT_REGIONS = [
+    "תל אביב והמרכז", "השרון", "ירושלים והסביבה", "חיפה והכרמל",
+    "הגליל התחתון", "הגליל העליון והגולן", "מישור החוף הצפוני",
+    "מישור החוף הדרומי", "הנגב ואילת", "השפלה", "השומרון",
+]
+
+
 def normalize(name: str) -> str:
     fixes = {
-        "ניצתץ": "ניצת",
+        "ניצתץ":       "ניצת",
         "ניצתהדובדבן": "ניצת הדובדבן",
-        "הדבדובן": "הדובדבן",
-        "הדובדבהן": "הדובדבן",
-        "הדודבן": "הדובדבן",
+        "הדבדובן":     "הדובדבן",
+        "הדובדבהן":    "הדובדבן",
+        "הדודבן":      "הדובדבן",
+        "הדודבדבן":    "הדובדבן",
     }
     for wrong, right in fixes.items():
         name = name.replace(wrong, right)
     return re.sub(r"\s{2,}", " ", name).strip()
+
+
+def strip_region(text: str) -> str:
+    """מסיר שם אזור שנדבק לשם הסניף."""
+    for region in NIZAT_REGIONS:
+        text = text.replace(region, "").strip()
+    return text.strip()
 
 
 # ── ניצת הדובדבן ─────────────────────────────────────────────────────────────
@@ -82,8 +97,12 @@ def scrape_nizat() -> list[dict]:
                 if not branch_name or branch_name in ("שם הסניף", "סניף"):
                     continue
 
-                # Try to extract city from address (last token often city)
+                # הסר אזור שנדבק לשם הסניף (למשל "עפולהחיפה והכרמל" → "עפולה")
+                branch_name = strip_region(branch_name)
+                region      = strip_region(region)
+
                 city = extract_city_from_address(address) or branch_name.split(" - ")[0]
+                city = strip_region(city)
 
                 stores.append({
                     "chain":   "ניצת הדובדבן",
