@@ -289,6 +289,14 @@ def build_context(user_msg, stores, deliveries, notes, visits):
 
 
 # ── שאל את Claude ─────────────────────────────────────────
+def is_history_question(msg):
+    """זיהוי שאלות על היסטוריה/ביקורים שכבר היו — אסור לענות עליהן מהדמיון."""
+    keywords = ["איפה היית", "איפה הייתי", "איפה הלכת", "ביקרת היום",
+                "מה עשית", "היום הייתי", "היום ביקרתי", "סיכום היום",
+                "כמה ביקרת", "אצל מי היית"]
+    return any(k in msg for k in keywords)
+
+
 def ask_claude(user_msg, context_text, chat_history):
     try:
         today = datetime.now().strftime("%d/%m/%Y")
@@ -327,7 +335,7 @@ def ask_claude(user_msg, context_text, chat_history):
                 "content-type": "application/json"
             },
             json={
-                "model": "claude-3-5-haiku-20241022",
+                "model": "claude-haiku-4-5",
                 "max_tokens": 1024,
                 "system": system_prompt,
                 "messages": messages
@@ -376,8 +384,34 @@ with tab1:
                 deliveries = get_deliveries()
                 notes      = get_notes()
                 visits     = get_manual_visits()
-                context    = build_context(prompt, stores, deliveries, notes, visits)
-                reply      = ask_claude(prompt, context, st.session_state.messages[:-1])
+
+                # שאלות היסטוריה — תשובה ישירה מהנתונים, ללא Claude
+                if is_history_question(prompt):
+                    today_str = datetime.now().strftime("%d/%m/%y")
+                    today_vis = [v for v in visits if v.get("date","").startswith(today_str)]
+                    today_del = [d for d in deliveries if d.get("date","").startswith(today_str)]
+
+                    lines = [f"📅 **סיכום היום ({today_str}):**\n"]
+                    if today_vis:
+                        lines.append("👣 **ביקורים שהוזנו:**")
+                        for v in today_vis:
+                            icon = "✅" if v.get("status") == "ביקור" else "⚠️"
+                            lines.append(f"{icon} {v.get('store','')} — {v.get('status','')}")
+                    else:
+                        lines.append("👣 לא הוזנו ביקורים להיום")
+
+                    if today_del:
+                        lines.append(f"\n🚚 **תעודות משלוח שירדו היום ({len(today_del)}):**")
+                        for d in today_del:
+                            lines.append(f"• {d.get('branch','')} ({d.get('date','')[6:11]})")
+                    else:
+                        lines.append("\n🚚 לא ירדו תעודות משלוח היום")
+
+                    reply = "\n".join(lines)
+                else:
+                    context = build_context(prompt, stores, deliveries, notes, visits)
+                    reply   = ask_claude(prompt, context, st.session_state.messages[:-1])
+
             st.markdown(reply)
 
         st.session_state.messages.append({"role": "assistant", "content": reply})
