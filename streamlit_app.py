@@ -86,13 +86,13 @@ def get_stores():
         return []
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=120)
 def get_deliveries():
     try:
         url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/senzey_data.csv"
         r = requests.get(url, timeout=10)
-        r.encoding = "utf-8"
-        rows = list(csv.DictReader(io.StringIO(r.text)))
+        text = r.content.decode("utf-8-sig")
+        rows = list(csv.DictReader(io.StringIO(text)))
         return rows
     except:
         return []
@@ -103,8 +103,8 @@ def get_notes():
     try:
         url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/store_notes.csv"
         r = requests.get(url, timeout=10)
-        r.encoding = "utf-8"
-        return list(csv.DictReader(io.StringIO(r.text)))
+        text = r.content.decode("utf-8-sig")
+        return list(csv.DictReader(io.StringIO(text)))
     except:
         return []
 
@@ -114,8 +114,8 @@ def get_manual_visits():
     try:
         url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/manual_visits.csv"
         r = requests.get(url, timeout=10)
-        r.encoding = "utf-8"
-        return list(csv.DictReader(io.StringIO(r.text)))
+        text = r.content.decode("utf-8-sig")
+        return list(csv.DictReader(io.StringIO(text)))
     except:
         return []
 
