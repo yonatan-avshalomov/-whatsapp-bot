@@ -293,9 +293,60 @@ def scrape_shilav() -> list[dict]:
     return stores
 
 
-# ── Google Sheets (מכבי + חנויות פרטיות) ────────────────────────────────────
+# ── מכבי פארם — מתוך קובץ הסנזי ────────────────────────────────────────────
 
-CHAIN_PREFIXES = ("ניצת הדובדבן", "שילב")   # these come from web, skip from Sheets
+def extract_maccabi_from_senzey(filename="senzey_data.csv") -> list[dict]:
+    """שולף סניפי מכבי ייחודיים מתוך תעודות המשלוח — אלה הלקוחות האמיתיים."""
+    print("💊 שולף סניפי מכבי פארם מסנזי ...", flush=True)
+
+    def clean(branch: str) -> str:
+        import re
+        branch = re.sub(r'הזמנה[\s\-:]*[\d]+', '', branch)
+        branch = re.sub(r'מספר הזמנה[\s:]*[\d]+', '', branch)
+        branch = re.sub(r'[\d]{5,}', '', branch)
+        branch = re.sub(r'מכבי שירותי בריאות', 'מכבי פארם', branch)
+        # "עיר - מכבי פארם - עיר" → "מכבי פארם עיר"
+        branch = re.sub(r'^.+?\s*-\s*(מכבי)', r'\1', branch)
+        branch = re.sub(r'(מכבי פארם)\s*-\s*', r'\1 ', branch)
+        # "פתח תקווה שפיגל מכבי פארם" → "מכבי פארם פתח תקווה שפיגל"
+        branch = re.sub(r'^(.+?)\s+(מכבי פארם)$', r'\2 \1', branch)
+        branch = re.sub(r'^(.+?)\s+(מכבי\b)(?!\s*פארם)', r'מכבי פארם \1', branch)
+        branch = re.sub(r'[\s\-:]+$', '', branch).strip()
+        branch = re.sub(r'\s{2,}', ' ', branch)
+        return branch
+
+    try:
+        with open(filename, encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        print("  ⚠️  לא נמצא senzey_data.csv", flush=True)
+        return []
+
+    seen, stores = set(), []
+    for r in rows:
+        b = r.get("branch", "")
+        if "מכבי" not in b:
+            continue
+        clean_name = clean(b)
+        if not clean_name or clean_name in seen:
+            continue
+        seen.add(clean_name)
+        city = extract_city_from_address(clean_name)
+        stores.append({
+            "chain":   "מכבי פארם",
+            "name":    clean_name,
+            "city":    city,
+            "address": "",
+            "phone":   "",
+        })
+
+    print(f"  ✅ {len(stores)} סניפים", flush=True)
+    return stores
+
+
+# ── Google Sheets (חנויות פרטיות בלבד) ──────────────────────────────────────
+
+CHAIN_PREFIXES = ("ניצת הדובדבן", "שילב", "מכבי")   # these come from other sources
 
 def scrape_google_sheets() -> list[dict]:
     print("📊 קורא מ-Google Sheets (מכבי + פרטיות) ...", flush=True)
@@ -340,11 +391,12 @@ def scrape_google_sheets() -> list[dict]:
 # ── ראשי ─────────────────────────────────────────────────────────────────────
 
 def main():
-    nizat  = scrape_nizat()
-    shilav = scrape_shilav()
-    sheets = scrape_google_sheets()
+    nizat    = scrape_nizat()
+    shilav   = scrape_shilav()
+    maccabi  = extract_maccabi_from_senzey()
+    sheets   = scrape_google_sheets()
 
-    all_stores = nizat + shilav + sheets
+    all_stores = nizat + shilav + maccabi + sheets
 
     # Write
     with open(OUTPUT_FILE, "w", encoding="utf-8-sig", newline="") as f:
