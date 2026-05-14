@@ -262,7 +262,7 @@ def build_context(user_msg, stores, deliveries, notes, visits):
             lines.append(f"• {d['date']} — {d.get('branch','')[:40]}")
 
     # ביקורים ידניים היום
-    today_visits = [v for v in visits if v.get("date","").startswith(today[:5])]
+    today_visits = [v for v in visits if v.get("date","").startswith(today)]
     if today_visits:
         lines.append(f"\nביקורים היום:")
         for v in today_visits:
@@ -285,14 +285,22 @@ def ask_claude(user_msg, context_text, chat_history):
 ענה תמיד בעברית, קצר וברור. השתמש בבוליטים כשיש רשימות.
 תאריך היום: {today}
 
-כללים:
+⛔ חוק מספר 1 — אסור להמציא נתונים:
+- ענה רק על פי המידע שמופיע בהקשר למטה
+- אם אין נתון — אמור "אין מידע על זה" ואל תנחש
+- אל תמציא ביקורים, תעודות משלוח, או הערות שלא מופיעות בהקשר
+- אם שואלים על היום ואין תעודות — אמור "אין תעודות היום עדיין"
+
+כללים נוספים:
 - ⚠️ = לא בוקר יותר מחודש
 - ✅ = בוקר בשבועיים האחרונים
 - כשמישהו שואל "מה דחוף" — הצג חנויות שלא בוקרו הכי הרבה זמן
 - כשמישהו שואל על עיר — הצג רק אותה עיר עם תאריכים
 - כל ניצת הדובדבן = לקוחות סופר סאפ (הפצה דרכם, אבל כדאי לבקר)
 
-{context_text}"""
+--- נתונים אמיתיים בלבד ---
+{context_text}
+--- סוף נתונים ---"""
 
         messages = []
         for msg in chat_history[-8:]:
@@ -433,9 +441,9 @@ with tab3:
     visits     = get_manual_visits()
     notes      = get_notes()
 
-    today_del = [d for d in deliveries if d.get("date","").startswith(today_str[:5])]
-    today_vis = [v for v in visits    if v.get("date","").startswith(today_str[:5])]
-    today_not = [n for n in notes     if n.get("date","").startswith(today_str[:5])]
+    today_del = [d for d in deliveries if d.get("date","").startswith(today_str)]
+    today_vis = [v for v in visits    if v.get("date","") == today_str or v.get("date","").startswith(today_str)]
+    today_not = [n for n in notes     if n.get("date","") == today_str or n.get("date","").startswith(today_str)]
 
     col1, col2, col3 = st.columns(3)
     col1.metric("תעודות משלוח", len(today_del))
