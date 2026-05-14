@@ -344,8 +344,15 @@ MACCABI_KNOWN = [
     ("מכבי פארם עכו",                  "עכו"),
     ("מכבי פארם נצרת נוף הגליל",       "נוף הגליל"),
     ("מכבי פארם אום אל פחם",           "אום אל פחם"),
+    ("מכבי פארם עפולה",                 "עפולה"),
     ("מכבי פארם יקנעם",                "יקנעם"),
     ("מכבי קריית טבעון",               "קרית טבעון"),
+    ("מכבי פארם טבריה",                "טבריה"),
+    ("מכבי פארם בית שאן",              "בית שאן"),
+    ("מכבי פארם מגדל העמק",            "מגדל העמק"),
+    ("מכבי פארם קרית שמונה",           "קרית שמונה"),
+    ("מכבי פארם צפת",                  "צפת"),
+    ("מכבי פארם נשר",                  "נשר"),
     # מרכז
     ("מכבי פארם ראשון לציון מזרח",     "ראשון לציון"),
     ("מכבי פארם ראשון לציון מערב",     "ראשון לציון"),
@@ -391,15 +398,15 @@ def extract_maccabi_from_senzey(filename="senzey_data.csv") -> list[dict]:
         branch = re.sub(r'הזמנה[\s\-:]*[\d]+', '', branch)
         branch = re.sub(r'מספר הזמנה[\s:]*[\d]+', '', branch)
         branch = re.sub(r'[\d]{5,}', '', branch)
+        branch = re.sub(r'[\s\-:]+$', '', branch).strip()   # נקה קצוות לפני התבניות
         branch = re.sub(r'מכבי שירותי בריאות', 'מכבי פארם', branch)
         # "עיר - מכבי פארם - עיר" → "מכבי פארם עיר"
         branch = re.sub(r'^.+?\s*-\s*(מכבי)', r'\1', branch)
         branch = re.sub(r'(מכבי פארם)\s*-\s*', r'\1 ', branch)
-        # "פתח תקווה שפיגל מכבי פארם" → "מכבי פארם פתח תקווה שפיגל"
+        # "ראש העין הציונות מכבי פארם" → "מכבי פארם ראש העין הציונות"
         branch = re.sub(r'^(.+?)\s+(מכבי פארם)$', r'\2 \1', branch)
         branch = re.sub(r'^(.+?)\s+(מכבי\b)(?!\s*פארם)', r'מכבי פארם \1', branch)
-        branch = re.sub(r'[\s\-:]+$', '', branch).strip()
-        branch = re.sub(r'\s{2,}', ' ', branch)
+        branch = re.sub(r'\s{2,}', ' ', branch).strip()
         return branch
 
     try:
@@ -427,9 +434,19 @@ def extract_maccabi_from_senzey(filename="senzey_data.csv") -> list[dict]:
             "phone":   "",
         })
 
-    # הוסף סניפים ידועים שלא מופיעים בסנזי
+    def maccabi_key(name: str) -> str:
+        """מפתח נירמול: מסיר 'מכבי', 'פארם' ומשווה רק את שם המקום."""
+        import re
+        k = re.sub(r'מכבי|פארם', '', name)
+        k = re.sub(r'\s+', ' ', k).strip()
+        return k
+
+    # הוסף סניפים ידועים שלא מופיעים בסנזי (ללא כפילויות)
+    seen_keys = {maccabi_key(s) for s in seen}
     for name, city in MACCABI_KNOWN:
-        if name not in seen:
+        key = maccabi_key(name)
+        if key not in seen_keys:
+            seen_keys.add(key)
             seen.add(name)
             stores.append({
                 "chain":   "מכבי פארם",
