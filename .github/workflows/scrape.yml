@@ -1,0 +1,49 @@
+name: Senzey Hourly Scrape
+
+on:
+  schedule:
+    # Every hour from 05:00 to 17:00 UTC = 08:00 to 20:00 Israel time (UTC+3 summer)
+    - cron: '0 5-17 * * *'
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run scraper
+        env:
+          SENZEY_USERNAME: ${{ secrets.SENZEY_USERNAME }}
+          SENZEY_PASSWORD: ${{ secrets.SENZEY_PASSWORD }}
+        run: python senzey_scraper.py
+
+      - name: Commit and push if data changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add senzey_data.csv
+          if git diff --cached --quiet; then
+            echo "אין תעודות חדשות — אין מה לדחוף"
+          else
+            COUNT=$(git diff --cached --stat | tail -1)
+            git commit -m "🤖 סנזי: עדכון אוטומטי $(date +'%d/%m/%Y %H:%M') UTC"
+            git push
+            echo "✅ עודכן: $COUNT"
+          fi
