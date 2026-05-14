@@ -255,18 +255,29 @@ def build_context(user_msg, stores, deliveries, notes, visits):
                 ld = last_delivery(s) or "לא ידוע"
                 lines.append(f"  • {s['name']} — {ld}")
 
-    # תעודות אחרונות (סחורה שירדה מהמחסן — לא ביקור של המשתמש!)
+    # תעודות משלוח היום
+    today_deliveries = [d for d in deliveries if d.get("date","").startswith(today)]
+    if today_deliveries:
+        lines.append(f"\n🚚 תעודות משלוח היום — ירידת סחורה מהמחסן (לא ביקור אישי!) ({len(today_deliveries)}):")
+        for d in today_deliveries:
+            lines.append(f"• {d['date']} — {d.get('branch','')[:40]}")
+    else:
+        lines.append(f"\n🚚 תעודות משלוח היום: אין עדיין")
+
+    # תעודות אחרונות (כל הזמן)
     if deliveries:
-        lines.append(f"\n🚚 תעודות משלוח אחרונות (ירידת סחורה מהמחסן, לא ביקור אישי):")
-        for d in deliveries[:10]:
+        lines.append(f"\n📦 תעודות משלוח אחרונות (ירידת סחורה מהמחסן, לא ביקורים אישיים):")
+        for d in deliveries[:8]:
             lines.append(f"• {d['date']} — {d.get('branch','')[:40]}")
 
     # ביקורים ידניים היום
     today_visits = [v for v in visits if v.get("date","").startswith(today)]
     if today_visits:
-        lines.append(f"\nביקורים היום:")
+        lines.append(f"\n👣 ביקורים ידניים היום ({len(today_visits)}):")
         for v in today_visits:
             lines.append(f"• {v.get('store','')} — {v.get('status','')}")
+    else:
+        lines.append(f"\n👣 ביקורים ידניים היום: אין — המשתמש לא הזין ביקורים להיום")
 
     # הערות
     if notes:
