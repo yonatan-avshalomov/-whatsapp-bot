@@ -166,9 +166,19 @@ def city_distance_from_home(city: str) -> float:
     return 999.0
 
 
+def store_distance_from_home(store: dict) -> float:
+    """מרחק מדויק לפי GPS של החנות, או לפי עיר אם אין."""
+    try:
+        lat = float(store.get("lat", "") or "")
+        lon = float(store.get("lon", "") or "")
+        return haversine(HOME_COORDS[0], HOME_COORDS[1], lat, lon)
+    except (ValueError, TypeError):
+        return city_distance_from_home(store.get("city", ""))
+
+
 def sort_stores_by_distance(stores: list) -> list:
-    """ממיין חנויות מהקרובה לרחוקה מהוד השרון."""
-    return sorted(stores, key=lambda s: city_distance_from_home(s.get("city", "")))
+    """ממיין חנויות מהקרובה לרחוקה מהוד השרון לפי GPS מדויק."""
+    return sorted(stores, key=lambda s: store_distance_from_home(s))
 
 
 def is_route_question(msg: str) -> bool:
@@ -373,13 +383,17 @@ def build_context(user_msg, stores, deliveries, notes, visits):
         return best
 
     if mentioned_city:
-        relevant = [s for s in stores if s["city"] == mentioned_city]
+        # כל החנויות בעיר הזו — ממוינות לפי מיקום GPS מדויק בתוך העיר
+        relevant = [s for s in stores if s["city"] == mentioned_city or mentioned_city in s["city"]]
         relevant = sort_stores_by_distance(relevant)
         dist = city_distance_from_home(mentioned_city)
-        lines.append(f"חנויות ב{mentioned_city} ({len(relevant)}) — {dist:.0f} ק\"מ מהוד השרון:")
+        lines.append(f"📍 כל החנויות ב{mentioned_city} ({len(relevant)}) — {dist:.0f} ק\"מ מהוד השרון:")
+        lines.append(f"(ממוין לפי מיקום GPS מדויק)")
         for s in relevant:
             ld = last_delivery(s) or "לא ידוע"
-            lines.append(f"• {s['name']} | {s['address']} | אחרון: {ld}")
+            d = store_distance_from_home(s)
+            chain = f"[{s.get('chain','')}] " if s.get('chain') else ""
+            lines.append(f"• {chain}{s['name']} | {s['address']} | אחרון: {ld} | {d:.1f}ק\"מ")
     elif is_route_question(user_msg):
         # מסלול יומי — ממוין מקרוב לרחוק
         sorted_stores = sort_stores_by_distance(stores)
