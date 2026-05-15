@@ -426,17 +426,50 @@ def build_context(user_msg, stores, deliveries, notes, visits):
         return format_date(best) if best else None
 
     if mentioned_city:
-        # כל החנויות בעיר הזו — ממוינות לפי מיקום GPS מדויק בתוך העיר
-        relevant = [s for s in stores if s["city"] == mentioned_city or mentioned_city in s["city"]]
-        relevant = sort_stores_by_distance(relevant)
-        dist = city_distance_from_home(mentioned_city)
-        lines.append(f"📍 כל החנויות ב{mentioned_city} ({len(relevant)}) — {dist:.0f} ק\"מ מהוד השרון:")
-        lines.append(f"(ממוין לפי מיקום GPS מדויק)")
+        # כל החנויות בעיר + ערים קרובות (רדיוס 40 ק"מ) — מינימום 10 חנויות
+        city_dist = city_distance_from_home(mentioned_city)
+
+        # חנויות בעיר עצמה
+        in_city = [s for s in stores if s["city"] == mentioned_city or mentioned_city in s["city"]]
+
+        # אם פחות מ-10 — הוסף ערים קרובות עד רדיוס 40 ק"מ
+        nearby = []
+        if len(in_city) < 10:
+            for s in stores:
+                if s in in_city:
+                    continue
+                d = store_distance_from_home(s)
+                # קרוב לאותו אזור (תוך 40 ק"מ מהעיר המוזכרת)
+                try:
+                    city_c = next((c for c in CITY_COORDS if c == mentioned_city), None)
+                    if city_c:
+                        mc = CITY_COORDS[city_c]
+                        sd = haversine(mc[0], mc[1],
+                                       float(s.get("lat") or 0),
+                                       float(s.get("lon") or 0))
+                        if sd <= 40:
+                            nearby.append(s)
+                except Exception:
+                    pass
+
+        relevant = sort_stores_by_distance(in_city + nearby)
+        # ודא לפחות 10
+        if len(relevant) < 10:
+            all_sorted = sort_stores_by_distance(stores)
+            start = next((i for i, s in enumerate(all_sorted)
+                          if s["city"] == mentioned_city or mentioned_city in s.get("city","")), 0)
+            relevant = all_sorted[max(0, start-2): start + max(10, len(in_city)) + 5]
+
+        lines.append(f"📍 חנויות באזור {mentioned_city} ({len(relevant)}) — {city_dist:.0f} ק\"מ מהוד השרון:")
+        lines.append(f"(ממוין מקרוב לרחוק, כולל ערים סמוכות)")
+        prev_city = None
         for s in relevant:
             ld = last_delivery(s) or "לא ידוע"
             d = store_distance_from_home(s)
             chain = f"[{s.get('chain','')}] " if s.get('chain') else ""
-            lines.append(f"• {chain}{s['name']} | {s['address']} | אחרון: {ld} | {d:.1f}ק\"מ")
+            city_label = f" ({s['city']})" if s["city"] != mentioned_city else ""
+            lines.append(f"• {chain}{s['name']}{city_label} | {s['address']} | אחרון: {ld} | {d:.1f}ק\"מ")
+
     elif is_route_question(user_msg):
         # מסלול יומי — מינימום 10 חנויות, ממוין מקרוב לרחוק
         sorted_stores = sort_stores_by_distance(stores)
@@ -534,7 +567,8 @@ def ask_claude(user_msg, context_text, chat_history):
 3. כשמישהו שואל "איפה היית היום" — הסתכל רק על סעיף "ביקורים ידניים היום". אם כתוב "אין" — אמור "לא הוזנו ביקורים להיום" ותו לא
 4. אסור לתת המלצות על ביקורים אלא אם המשתמש מבקש במפורש "מה לבקר מחר" או "מה דחוף"
 5. תעודת משלוח = סחורה שנשלחה מהמחסן — לא ביקור של המשתמש!
-6. אם אתה לא בטוח — אמור "אין מידע" ולא יותר
+6. ⛔ אסור בהחלט לומר "אין לי נתונים על ערים אחרות" או "שלח לי רשימת חנויות" — יש לך נתונים על 350+ חנויות בכל הארץ! אם לא מופיעות חנויות בנתונים — זה כי אין לנו חנויות שם, לא כי חסר מידע
+7. אם שאלו על אזור ויש מעט חנויות — הצג מה שיש וציין שזה מה שיש באזור זה
 
 כללים נוספים:
 - ⚠️ = לא בוקר יותר מחודש
