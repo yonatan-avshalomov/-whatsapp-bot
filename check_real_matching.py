@@ -9,11 +9,14 @@ with open("stores.csv", encoding="utf-8-sig") as f:
 
 def clean_senzey_branch(branch: str) -> str:
     branch = branch.replace('״', '"').replace('׳', "'")
+    branch = re.sub(r'^ל(?=שילב|מכבי|ניצת)', '', branch)
     branch = re.sub(r'הזמנה[\s\-:]*\d+', '', branch)
     branch = re.sub(r'מספר הזמנה\s*:?\s*\d+', '', branch)
     branch = re.sub(r':מספר הזמנה\s*\d*', '', branch)
     branch = re.sub(r'\s+\d{6,}\s*:?\s*מספר.*$', '', branch)
     branch = re.sub(r'\bהזמנת רכש[\s\-]*[\d]+', '', branch)
+    branch = re.sub(r'\s+הזמנה\b.*$', '', branch)
+    branch = re.sub(r'(?<=[א-ת])-(?=[א-ת])', ' ', branch)
     branch = re.sub(r'^\d{7,}\s*', '', branch)
     branch = re.sub(r'\s+\d{7,}$', '', branch)
     branch = re.sub(r'\s+10[0-9]{7,}', '', branch)

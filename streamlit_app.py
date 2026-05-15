@@ -382,6 +382,8 @@ def clean_senzey_branch(branch: str) -> str:
     מסיר מספרי הזמנה, מנרמל קיצורים ואיותים."""
     # נרמול גרשיים עבריים (U+05F4/U+05F3) → תווים רגילים
     branch = branch.replace('״', '"').replace('׳', "'")
+    # הסרת קידומת ל' לפני שם רשת (כגון "לשילב עפולה")
+    branch = re.sub(r'^ל(?=שילב|מכבי|ניצת)', '', branch)
     # הסרת מספרי הזמנה — סגנונות שונים
     branch = re.sub(r'הזמנה[\s\-:]*\d+', '', branch)
     branch = re.sub(r'מספר הזמנה\s*:?\s*\d+', '', branch)
@@ -389,6 +391,10 @@ def clean_senzey_branch(branch: str) -> str:
     branch = re.sub(r'\s+\d{6,}\s*:?\s*מספר.*$', '', branch)   # NUMBER :מספר... בסוף
     branch = re.sub(r'\bהזמנת רכש[\s\-]*[\d]+', '', branch)
     branch = re.sub(r'\btעודת משלוח רכש.*$', '', branch)
+    # הסרת "הזמנה-שם חנות (מספר)" — שם חנות כפול אחרי הזמנה
+    branch = re.sub(r'\s+הזמנה\b.*$', '', branch)
+    # נרמול מקף בין אותיות עבריות (כגון "בית שמש-ישעיהו") → רווח
+    branch = re.sub(r'(?<=[א-ת])-(?=[א-ת])', ' ', branch)
     # הסרת מספרים בודדים בתחילת/סוף השם
     branch = re.sub(r'^\d{7,}\s*', '', branch)
     branch = re.sub(r'\s+\d{7,}$', '', branch)
@@ -450,9 +456,9 @@ def visit_status(raw_date: str) -> str:
             return "✅ אתמול!"
         if diff <= 7:
             return f"✅ לפני {diff} ימים"
-        if diff <= 14:
+        if diff <= 21:
             return f"⚠️ לפני {diff} ימים"
-        if diff <= 30:
+        if diff <= 60:
             return f"⚠️ לפני {diff//7} שבועות"
         return f"🔴 לפני {diff} ימים"
     except Exception:
