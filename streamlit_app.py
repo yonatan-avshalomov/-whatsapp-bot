@@ -657,10 +657,22 @@ def build_context(user_msg, stores, deliveries, notes, visits):
                 if senzey_best is None or date > senzey_best:
                     senzey_best = date
 
+        # המר תאריך סנזי "DD/MM/YY HH:MM" → "YYYY-MM-DD HH:MM" להשוואה תקינה
+        if senzey_best:
+            try:
+                sp = senzey_best.split()
+                dp = sp[0].split("/")
+                tp = sp[1] if len(sp) > 1 else "00:00"
+                senzey_comparable = f"20{dp[2]}-{dp[1]}-{dp[0]} {tp}"
+            except Exception:
+                senzey_comparable = senzey_best
+        else:
+            senzey_comparable = None
+
         # ── מקור 2: ביקורים ידניים ──────────────────────────
         manual_best = manual_last.get(store_name)
         if manual_best:
-            # המר לפורמט DD/MM/YY 00:00 לצורך השוואה
+            # המר לפורמט YYYY-MM-DD 00:00 להשוואה
             try:
                 parts = manual_best.split("/")
                 manual_comparable = f"20{parts[2]}-{parts[1]}-{parts[0]} 00:00"
@@ -669,8 +681,8 @@ def build_context(user_msg, stores, deliveries, notes, visits):
         else:
             manual_comparable = None
 
-        # בחר את המאוחר
-        candidates = [(senzey_best, senzey_best), (manual_comparable, manual_best)]
+        # בחר את המאוחר — השוואה ב-ISO (YYYY-MM-DD) כדי למנוע באג מחרוזת
+        candidates = [(senzey_comparable, senzey_best), (manual_comparable, manual_best)]
         candidates = [(cmp, raw) for cmp, raw in candidates if cmp]
         if not candidates:
             return None
@@ -813,6 +825,33 @@ def is_history_question(msg):
     return any(k in msg for k in keywords)
 
 
+def detect_visit_in_msg(msg: str, stores_list: list) -> list:
+    """
+    אם המשתמש כותב 'ביקרתי ב...' / 'הייתי ב...' / 'הגעתי ל...' —
+    מחזיר רשימת חנויות שזוהו בהודעה.
+    """
+    VISIT_TRIGGERS = ["ביקרתי", "הייתי ב", "הגעתי ל", "ביקור ב", "סיימתי ב"]
+    if not any(kw in msg for kw in VISIT_TRIGGERS):
+        return []
+
+    found = []
+    # חיפוש שם מדויק
+    for s in stores_list:
+        if s["name"] in msg:
+            found.append(s)
+
+    # אם לא נמצא שם מדויק — חפש רשת + עיר
+    if not found:
+        for s in stores_list:
+            city  = s.get("city", "")
+            chain = s.get("chain", "")
+            if city and chain and len(city) > 2 and city in msg:
+                chain_word = chain.split()[0] if chain else ""
+                if chain_word and chain_word in msg:
+                    found.append(s)
+    return found
+
+
 def ask_claude(user_msg, context_text, chat_history):
     try:
         today = now_il().strftime("%d/%m/%Y")
@@ -886,7 +925,7 @@ with tab1:
     if "messages" not in st.session_state:
         st.session_state.messages = [{
             "role": "assistant",
-            "content": "שלום! אני העוזר לניהול החנויות שלך 🏪\n\n• **מה יש לי ב[עיר]** — רשימת חנויות\n• **מה דחוף** — מה לא בוקר הרבה זמן\n• **סיכום היום** — מה יצא היום\n\nמה תרצה לדעת?"
+            "content": "שלום! אני העוזר לניהול החנויות שלך 🏪\n\n• **מה יש לי ב[עיר]** — רשימת חנויות + סטטוס\n• **מה דחוף** — מה לא בוקר הרבה זמן\n• **סיכום היום / איפה הייתי** — ביקורים של היום\n• **ביקרתי בשילב הרצליה** — רישום ביקור ישיר מהשיחה ✅\n\nמה תרצה לדעת?"
         }]
 
     for msg in st.session_state.messages:
@@ -905,8 +944,31 @@ with tab1:
                 notes      = get_notes()
                 visits     = get_manual_visits()
 
+                # ── זיהוי ביקור מהשיחה: "ביקרתי ב...", "הייתי ב..." ──
+                visited_stores = detect_visit_in_msg(prompt, stores)
+                if visited_stores:
+                    today_str = today_il()
+                    saved, failed = [], []
+                    for vs in visited_stores:
+                        ok = save_visit_to_github(today_str, vs["name"], vs.get("city",""), "ביקור", "")
+                        if ok:
+                            saved.append(vs["name"])
+                        else:
+                            failed.append(vs["name"])
+                    if saved:
+                        get_manual_visits.clear()
+                    lines = [f"✅ **נרשמו ביקורים להיום ({today_str}):**"]
+                    for n in saved:
+                        lines.append(f"• {n}")
+                    if failed:
+                        lines.append(f"\n⚠️ לא הצלחתי לשמור (בעיית חיבור): {', '.join(failed)}")
+                        lines.append("נסה לרשום שוב דרך לשונית 📝")
+                    if not saved and not failed:
+                        lines = ["לא זיהיתי שם חנות ספציפי בהודעה. אפשר לכתוב את השם המלא? לדוגמה: 'ביקרתי בשילב הרצליה'"]
+                    reply = "\n".join(lines)
+
                 # שאלות היסטוריה — תשובה ישירה מהנתונים, ללא Claude
-                if is_history_question(prompt):
+                elif is_history_question(prompt):
                     today_str = today_il()
                     today_vis = [v for v in visits if v.get("date","").startswith(today_str)]
                     today_del = [d for d in deliveries if d.get("date","").startswith(today_str)]
