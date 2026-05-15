@@ -705,8 +705,9 @@ def build_context(user_msg, stores, deliveries, notes, visits):
 
         # ודא לפחות 10
         if len(relevant) < 10 and center:
+            already = {id(s) for s in in_city + nearby}
             extra = sorted(
-                [s for s in stores if s not in set(in_city + nearby)],
+                [s for s in stores if id(s) not in already],
                 key=lambda s: haversine(center[0], center[1],
                                         float(s.get("lat") or center[0]),
                                         float(s.get("lon") or center[1]))
