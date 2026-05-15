@@ -414,13 +414,32 @@ def build_context(user_msg, stores, deliveries, notes, visits):
         if cleaned and (cleaned not in branch_last_date or date > branch_last_date[cleaned]):
             branch_last_date[cleaned] = date
 
-    # התאמת חנות לתעודת משלוח — מדויקת יותר
+    # מילות עצירה — לא מספיקות לזיהוי ייחודי
+    STOP_WORDS = {"שילב", "מכבי", "פארם", "ניצת", "הדובדבן", "בית", "חולים",
+                  "קניון", "מרכז", "ביג", "פארק", "סניף", "סנטר", "שירותי", "בריאות"}
+
+    def words_overlap(a: str, b: str) -> int:
+        """מספר מילות תוכן משותפות בין שני שמות (ללא מילות עצירה)."""
+        wa = {w for w in a.split() if len(w) > 1 and w not in STOP_WORDS}
+        wb = {w for w in b.split() if len(w) > 1 and w not in STOP_WORDS}
+        return len(wa & wb)
+
+    def names_match(store_name: str, branch: str) -> bool:
+        """האם שם חנות מתאים לשם סניף מסנזי — גמיש לסדר מילים שונה."""
+        # התאמה ישירה (substring)
+        if store_name in branch or branch in store_name:
+            return True
+        # התאמה לפי מילות תוכן משותפות — מינימום 2 מילים משמעותיות
+        if words_overlap(store_name, branch) >= 2:
+            return True
+        return False
+
+    # התאמת חנות לתעודת משלוח
     def last_delivery(store):
         store_name = store["name"].strip()
         best = None
         for cleaned, date in branch_last_date.items():
-            # התאמה: שם החנות נמצא בסניף הנוקה, או הסניף הנוקה נמצא בשם החנות
-            if store_name in cleaned or cleaned in store_name:
+            if names_match(store_name, cleaned):
                 if best is None or date > best:
                     best = date
         return format_date(best) if best else None
