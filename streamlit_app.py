@@ -398,6 +398,49 @@ def format_date(raw: str) -> str:
         return raw
 
 
+def visit_status(raw_date: str) -> str:
+    """'14/05/26 13:31' → '✅ אתמול' / '⚠️ 3 שבועות' / '🔴 45 ימים'"""
+    try:
+        dt = datetime.strptime(raw_date[:14], "%d/%m/%y %H:%M")
+        diff = (now_il().replace(tzinfo=None) - dt).days
+        if diff == 0:
+            return "✅ היום!"
+        if diff == 1:
+            return "✅ אתמול!"
+        if diff <= 7:
+            return f"✅ לפני {diff} ימים"
+        if diff <= 14:
+            return f"⚠️ לפני {diff} ימים"
+        if diff <= 30:
+            return f"⚠️ לפני {diff//7} שבועות"
+        return f"🔴 לפני {diff} ימים"
+    except Exception:
+        return "❓ לא ידוע"
+
+
+def route_by_city(stores_list: list) -> list:
+    """מקבץ חנויות לפי עיר, ממיין ערים מהרחוקה לקרובה, ובתוך כל עיר מהרחוק לקרוב.
+    תוצאה: מסלול יעיל — יוצאים לנקודה הרחוקה, עוברים עיר-עיר ומסיימים קרוב לבית."""
+    by_city: dict = {}
+    for s in stores_list:
+        city = s.get("city") or "אחר"
+        by_city.setdefault(city, []).append(s)
+
+    def city_avg_dist(city):
+        dists = [store_distance_from_home(s) for s in by_city[city]]
+        return sum(dists) / len(dists) if dists else 0
+
+    cities_sorted = sorted(by_city.keys(), key=city_avg_dist, reverse=True)
+
+    result = []
+    for city in cities_sorted:
+        city_stores = sorted(by_city[city],
+                             key=lambda s: store_distance_from_home(s),
+                             reverse=True)
+        result.extend(city_stores)
+    return result
+
+
 # ── בניית הקשר לשיחה ─────────────────────────────────────
 def build_context(user_msg, stores, deliveries, notes, visits):
     today = today_il()
@@ -504,102 +547,135 @@ def build_context(user_msg, stores, deliveries, notes, visits):
             return True
         return False
 
-    # התאמת חנות לתעודת משלוח
-    def last_delivery(store):
+    # מיפוי ביקורים ידניים: שם חנות → תאריך אחרון
+    manual_last: dict[str, str] = {}
+    for v in visits:
+        store_v = v.get("store", "").strip()
+        date_v  = v.get("date", "")
+        if store_v and date_v:
+            # המר DD/MM/YY → YYYY-MM-DD לצורך השוואה
+            try:
+                parts = date_v.split("/")
+                if len(parts) == 3:
+                    normalized = f"20{parts[2]}-{parts[1]}-{parts[0]}"
+                else:
+                    normalized = date_v
+            except Exception:
+                normalized = date_v
+            if store_v not in manual_last or normalized > manual_last[store_v]:
+                manual_last[store_v] = date_v  # שמור כפי שהוא לתצוגה
+
+    def last_visit_raw(store) -> str | None:
+        """מחזיר תאריך גולמי של הביקור/משלוח האחרון — משני מקורות."""
         store_name = store["name"].strip()
-        best = None
+
+        # ── מקור 1: תעודות סנזי ─────────────────────────────
+        senzey_best = None
         for cleaned, date in branch_last_date.items():
             if names_match(store_name, cleaned):
-                if best is None or date > best:
-                    best = date
-        return format_date(best) if best else None
+                if senzey_best is None or date > senzey_best:
+                    senzey_best = date
+
+        # ── מקור 2: ביקורים ידניים ──────────────────────────
+        manual_best = manual_last.get(store_name)
+        if manual_best:
+            # המר לפורמט DD/MM/YY 00:00 לצורך השוואה
+            try:
+                parts = manual_best.split("/")
+                manual_comparable = f"20{parts[2]}-{parts[1]}-{parts[0]} 00:00"
+            except Exception:
+                manual_comparable = None
+        else:
+            manual_comparable = None
+
+        # בחר את המאוחר
+        candidates = [(senzey_best, senzey_best), (manual_comparable, manual_best)]
+        candidates = [(cmp, raw) for cmp, raw in candidates if cmp]
+        if not candidates:
+            return None
+        _, best_raw = max(candidates, key=lambda x: x[0])
+        return best_raw
 
     if mentioned_city:
         # כל החנויות בעיר + ערים קרובות (רדיוס 40 ק"מ) — מינימום 10 חנויות
         city_dist = city_distance_from_home(mentioned_city)
 
         # חנויות בעיר עצמה
-        in_city = [s for s in stores if s["city"] == mentioned_city or mentioned_city in s["city"]]
+        in_city = [s for s in stores if s.get("city","") == mentioned_city or mentioned_city in s.get("city","")]
 
         # אם פחות מ-10 — הוסף ערים קרובות עד רדיוס 40 ק"מ
         nearby = []
-        if len(in_city) < 10:
+        center = CITY_COORDS.get(mentioned_city)
+        if len(in_city) < 10 and center:
             for s in stores:
                 if s in in_city:
                     continue
-                d = store_distance_from_home(s)
-                # קרוב לאותו אזור (תוך 40 ק"מ מהעיר המוזכרת)
                 try:
-                    city_c = next((c for c in CITY_COORDS if c == mentioned_city), None)
-                    if city_c:
-                        mc = CITY_COORDS[city_c]
-                        sd = haversine(mc[0], mc[1],
-                                       float(s.get("lat") or 0),
-                                       float(s.get("lon") or 0))
-                        if sd <= 40:
-                            nearby.append(s)
+                    sd = haversine(center[0], center[1],
+                                   float(s.get("lat") or 0),
+                                   float(s.get("lon") or 0))
+                    if sd <= 40:
+                        nearby.append(s)
                 except Exception:
                     pass
 
-        # מיין מרחוק לקרוב — יוצאים לנקודה הרחוקה ביותר וחוזרים הביתה
-        relevant = list(reversed(sort_stores_by_distance(in_city + nearby)))
+        # מסלול מקובץ לפי עיר: רחוק → קרוב, בתוך כל עיר רחוק → קרוב
+        relevant = route_by_city(in_city + nearby)
+
         # ודא לפחות 10
-        if len(relevant) < 10:
-            all_sorted = list(reversed(sort_stores_by_distance(stores)))
-            # מצא חנויות קרובות לעיר המוזכרת
-            center = CITY_COORDS.get(mentioned_city)
-            if center:
-                extra = sorted(
-                    [s for s in stores if s not in (in_city + nearby)],
-                    key=lambda s: haversine(center[0], center[1],
-                                            float(s.get("lat") or center[0]),
-                                            float(s.get("lon") or center[1]))
-                )[:10]
-                relevant = list(reversed(sort_stores_by_distance(in_city + nearby + extra)))
+        if len(relevant) < 10 and center:
+            extra = sorted(
+                [s for s in stores if s not in set(in_city + nearby)],
+                key=lambda s: haversine(center[0], center[1],
+                                        float(s.get("lat") or center[0]),
+                                        float(s.get("lon") or center[1]))
+            )[:10]
+            relevant = route_by_city(in_city + nearby + extra)
 
         lines.append(f"📍 מסלול באזור {mentioned_city} ({len(relevant)} חנויות) — {city_dist:.0f} ק\"מ מהוד השרון:")
-        lines.append(f"⬇️ סדר נסיעה: מהרחוק לקרוב — יוצאים לנקודה הכי רחוקה ומתקרבים הביתה")
-        for s in relevant:
-            ld = last_delivery(s) or "לא ידוע"
+        lines.append(f"⬇️ סדר: מקובץ לפי עיר, בכל עיר מהרחוק לקרוב — יוצאים רחוק ומתקרבים הביתה")
+        prev_city_r = None
+        for i, s in enumerate(relevant, 1):
+            raw = last_visit_raw(s)
+            status = visit_status(raw) if raw else "🔴 אין מידע"
             d = store_distance_from_home(s)
-            chain = f"[{s.get('chain','')}] " if s.get('chain') else ""
-            city_label = f" ({s['city']})" if s.get("city","") != mentioned_city else ""
-            lines.append(f"• {chain}{s['name']}{city_label} | {s['address']} | אחרון: {ld} | {d:.1f}ק\"מ")
+            city_label = s.get("city", "")
+            if city_label != prev_city_r:
+                lines.append(f"\n🏙️ {city_label} (~{d:.0f} ק\"מ):")
+                prev_city_r = city_label
+            addr = s.get("address","")
+            lines.append(f"  {i}. {s['name']}{' | '+addr if addr else ''} | {status}")
 
     elif is_route_question(user_msg):
-        # מסלול יומי — מינימום 10 חנויות, מרחוק לקרוב
-        # כך שמתחילים בנקודה הרחוקה ביותר וחוזרים הביתה
-
-        # סנן לפי אזור אם הוזכר בשאלה
-        area_stores = sort_stores_by_distance(stores)
+        # מסלול יומי כללי — מינימום 10 חנויות, מקובץ לפי עיר
+        area_stores = stores
         for s in stores:
-            if s["city"] and s["city"] in user_msg:
-                area_stores = [x for x in sort_stores_by_distance(stores)
-                                if s["city"] in x.get("city","")]
+            if s.get("city") and s["city"] in user_msg:
+                area_stores = [x for x in stores if s["city"] in x.get("city","")]
                 break
 
-        # ודא מינימום 10 חנויות
         if len(area_stores) < 10:
-            area_stores = sort_stores_by_distance(stores)
+            area_stores = stores
 
-        # היפוך — מרחוק לקרוב
-        area_stores = list(reversed(area_stores))
+        # מסלול מקובץ לפי עיר
+        area_stores = route_by_city(area_stores)
 
-        lines.append(f"מסלול יומי — מהנקודה הרחוקה ביותר חזרה לביתה:")
-        lines.append(f"⬇️ סדר: יוצאים רחוק קודם, מתקרבים לביית בסוף | מינימום 10 חנויות")
+        lines.append(f"מסלול יומי — מקובץ לפי עיר, מהרחוקה לקרובה:")
+        lines.append(f"⬇️ סדר: יוצאים לעיר הרחוקה ביותר, גומרים את כל חנויותיה, ממשיכים לעיר הבאה")
         prev_city = None
         for s in area_stores[:80]:
             city = s.get("city", "")
             dist = store_distance_from_home(s)
-            ld = last_delivery(s) or "—"
+            raw = last_visit_raw(s)
+            status = visit_status(raw) if raw else "🔴 אין מידע"
             if city != prev_city:
                 lines.append(f"\n📍 {city} (~{dist:.0f} ק\"מ):")
                 prev_city = city
-            lines.append(f"  • {s['name']} | אחרון: {ld}")
+            lines.append(f"  • {s['name']} | {status}")
     else:
         by_city = {}
         for s in stores:
-            by_city.setdefault(s["city"] or "אחר", []).append(s)
+            by_city.setdefault(s.get("city") or "אחר", []).append(s)
         # מיין ערים לפי מרחק
         cities_sorted = sorted(by_city.keys(), key=lambda c: city_distance_from_home(c))
         lines.append(f"סה\"כ {len(stores)} חנויות (מקרוב לרחוק מהוד השרון):")
@@ -607,8 +683,9 @@ def build_context(user_msg, stores, deliveries, notes, visits):
             dist = city_distance_from_home(city)
             lines.append(f"\n📍 {city} (~{dist:.0f} ק\"מ):")
             for s in by_city[city][:4]:
-                ld = last_delivery(s) or "לא ידוע"
-                lines.append(f"  • {s['name']} — {ld}")
+                raw = last_visit_raw(s)
+                status = visit_status(raw) if raw else "🔴 אין מידע"
+                lines.append(f"  • {s['name']} — {status}")
 
     # תעודות משלוח היום
     today_deliveries = [d for d in deliveries if d.get("date","").startswith(today)]
