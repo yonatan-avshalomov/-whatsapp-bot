@@ -925,7 +925,7 @@ with tab1:
     if "messages" not in st.session_state:
         st.session_state.messages = [{
             "role": "assistant",
-            "content": "שלום! אני העוזר לניהול החנויות שלך 🏪\n\n• **מה יש לי ב[עיר]** — רשימת חנויות + סטטוס\n• **מה דחוף** — מה לא בוקר הרבה זמן\n• **סיכום היום / איפה הייתי** — ביקורים של היום\n• **ביקרתי בשילב הרצליה** — רישום ביקור ישיר מהשיחה ✅\n\nמה תרצה לדעת?"
+            "content": "שלום! אני העוזר לניהול החנויות שלך 🏪\n\n• **מה יש לי ב[עיר]** — רשימת חנויות + סטטוס\n• **מה דחוף** — מה לא בוקר הרבה זמן\n• **סיכום היום / איפה הייתי** — ביקורים של היום\n• **ביקרתי בשילב הרצליה** — רישום ביקור ישיר מהשיחה ✅\n• **כתובת [חנות]** — כתובת מדויקת של החנות\n\nמה תרצה לדעת?"
         }]
 
     for msg in st.session_state.messages:
@@ -1015,6 +1015,11 @@ with tab2:
     with col2:
         selected_city = st.selectbox("עיר", [""] + cities, key="note_city")
 
+    if selected_store:
+        store_info = next((s for s in stores if s["name"] == selected_store), None)
+        if store_info and store_info.get("address"):
+            st.caption(f"📍 {store_info['address']}, {store_info.get('city','')}")
+
     note_text = st.text_area("הערה", placeholder="לדוגמה: המנהל ביקש עוד מוס, המדף דליל...", key="note_text")
 
     note_type = st.radio("סוג", ["הערה כללית", "ביקרתי היום", "לא הגעתי", "צריך הזמנה"], horizontal=True)
@@ -1088,9 +1093,14 @@ with tab3:
 
     if today_vis:
         st.subheader("👣 ביקורים")
+        stores_tab3 = get_stores()
+        stores_map  = {s["name"]: s for s in stores_tab3}
         for v in today_vis:
-            icon = "✅" if v.get("status") == "ביקור" else "⚠️"
-            st.markdown(f"{icon} {v.get('store','')} — {v.get('status','')}")
+            icon       = "✅" if v.get("status") == "ביקור" else "⚠️"
+            v_store    = v.get('store', '')
+            s_info     = stores_map.get(v_store, {})
+            addr_part  = f" | 📍 {s_info['address']}" if s_info.get("address") else ""
+            st.markdown(f"{icon} {v_store} — {v.get('status','')}{addr_part}")
 
     if today_not:
         st.subheader("📝 הערות")
