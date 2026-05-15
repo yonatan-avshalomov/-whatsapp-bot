@@ -452,41 +452,52 @@ def build_context(user_msg, stores, deliveries, notes, visits):
                 except Exception:
                     pass
 
-        relevant = sort_stores_by_distance(in_city + nearby)
+        # מיין מרחוק לקרוב — יוצאים לנקודה הרחוקה ביותר וחוזרים הביתה
+        relevant = list(reversed(sort_stores_by_distance(in_city + nearby)))
         # ודא לפחות 10
         if len(relevant) < 10:
-            all_sorted = sort_stores_by_distance(stores)
-            start = next((i for i, s in enumerate(all_sorted)
-                          if s["city"] == mentioned_city or mentioned_city in s.get("city","")), 0)
-            relevant = all_sorted[max(0, start-2): start + max(10, len(in_city)) + 5]
+            all_sorted = list(reversed(sort_stores_by_distance(stores)))
+            # מצא חנויות קרובות לעיר המוזכרת
+            center = CITY_COORDS.get(mentioned_city)
+            if center:
+                extra = sorted(
+                    [s for s in stores if s not in (in_city + nearby)],
+                    key=lambda s: haversine(center[0], center[1],
+                                            float(s.get("lat") or center[0]),
+                                            float(s.get("lon") or center[1]))
+                )[:10]
+                relevant = list(reversed(sort_stores_by_distance(in_city + nearby + extra)))
 
-        lines.append(f"📍 חנויות באזור {mentioned_city} ({len(relevant)}) — {city_dist:.0f} ק\"מ מהוד השרון:")
-        lines.append(f"(ממוין מקרוב לרחוק, כולל ערים סמוכות)")
-        prev_city = None
+        lines.append(f"📍 מסלול באזור {mentioned_city} ({len(relevant)} חנויות) — {city_dist:.0f} ק\"מ מהוד השרון:")
+        lines.append(f"⬇️ סדר נסיעה: מהרחוק לקרוב — יוצאים לנקודה הכי רחוקה ומתקרבים הביתה")
         for s in relevant:
             ld = last_delivery(s) or "לא ידוע"
             d = store_distance_from_home(s)
             chain = f"[{s.get('chain','')}] " if s.get('chain') else ""
-            city_label = f" ({s['city']})" if s["city"] != mentioned_city else ""
+            city_label = f" ({s['city']})" if s.get("city","") != mentioned_city else ""
             lines.append(f"• {chain}{s['name']}{city_label} | {s['address']} | אחרון: {ld} | {d:.1f}ק\"מ")
 
     elif is_route_question(user_msg):
-        # מסלול יומי — מינימום 10 חנויות, ממוין מקרוב לרחוק
-        sorted_stores = sort_stores_by_distance(stores)
+        # מסלול יומי — מינימום 10 חנויות, מרחוק לקרוב
+        # כך שמתחילים בנקודה הרחוקה ביותר וחוזרים הביתה
 
         # סנן לפי אזור אם הוזכר בשאלה
-        area_stores = sorted_stores
+        area_stores = sort_stores_by_distance(stores)
         for s in stores:
             if s["city"] and s["city"] in user_msg:
-                area_stores = [x for x in sorted_stores if s["city"] in x.get("city","")]
+                area_stores = [x for x in sort_stores_by_distance(stores)
+                                if s["city"] in x.get("city","")]
                 break
 
         # ודא מינימום 10 חנויות
         if len(area_stores) < 10:
-            area_stores = sorted_stores
+            area_stores = sort_stores_by_distance(stores)
 
-        lines.append(f"מסלול יומי מהוד השרון — מינימום 10 חנויות (מקרוב לרחוק):")
-        lines.append(f"⚠️ חובה להציג לפחות 10 חנויות ביום")
+        # היפוך — מרחוק לקרוב
+        area_stores = list(reversed(area_stores))
+
+        lines.append(f"מסלול יומי — מהנקודה הרחוקה ביותר חזרה לביתה:")
+        lines.append(f"⬇️ סדר: יוצאים רחוק קודם, מתקרבים לביית בסוף | מינימום 10 חנויות")
         prev_city = None
         for s in area_stores[:80]:
             city = s.get("city", "")
@@ -558,8 +569,8 @@ def ask_claude(user_msg, context_text, chat_history):
         system_prompt = f"""אתה עוזר אישי חכם לניהול רשת חנויות בישראל.
 ענה תמיד בעברית, קצר וברור. השתמש בבוליטים כשיש רשימות.
 תאריך היום: {today}
-בית המשתמש: הוד השרון — תמיד תציג מסלולים וחנויות מהקרוב לרחוק מהוד השרון.
-כלל מסלול יומי: מינימום 10 חנויות ביום — אם שואלים על מסלול תציג לפחות 10, ואפשר לקבץ ערים קרובות ביחד.
+בית המשתמש: הוד השרון.
+כלל מסלול יומי: מינימום 10 חנויות ביום — מסדר מהרחוק לקרוב! כלומר: מתחיל בנקודה הכי רחוקה מהוד השרון וחוזר הביתה. כך יוצאים לקצה הרחוק ומסיימים קרוב לבית.
 
 ⛔ חוקים שאסור לעבור עליהם:
 1. השתמש אך ורק במידע שמופיע בין "--- נתונים ---" ו"--- סוף נתונים ---" למטה
