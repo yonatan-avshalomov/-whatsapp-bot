@@ -220,7 +220,7 @@ def normalize_store_name(name):
     return re.sub(r"\s{2,}", " ", name).strip()
 
 # ── טעינת נתונים ─────────────────────────────────────────
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def get_stores():
     """
     קורא חנויות מ-stores.csv (מסקריפר האתרים) — מקיף יותר.
