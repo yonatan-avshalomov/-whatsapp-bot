@@ -406,6 +406,13 @@ def clean_senzey_branch(branch: str) -> str:
     # ניקוי שורשים
     branch = re.sub(r'\s*-\s*$', '', branch)
     branch = re.sub(r'\s{2,}', ' ', branch).strip()
+    # פילטר GARBAGE — ספקים / חברות שאינן חנויות רלוונטיות
+    GARBAGE = {
+        'בל בוקס בע"מ', "בל בוקס", 'מור סילבר', "מור סילבר בע"מ",
+        "לוגיסטיקה", "מחסן", "ספק",
+    }
+    if any(g in branch for g in GARBAGE):
+        return ""
     return branch.strip()
 
 
@@ -523,9 +530,12 @@ def build_context(user_msg, stores, deliveries, notes, visits):
         # מיקומים נוספים שזוהו בתעודות
         "שילב אשדוד סטאר":             "שילב אשדוד סטאר סנטר",
         "שילב אשקלון סילבר":           "שילב אשקלון סילבר",
-        'שילב ג׳י כפס':               "שילב אשדוד ג׳י כפס",
-        "שילב רננים":                  "שילב פתח תקווה רננים",
+        'שילב ג׳י כפס':               "שילב כפר סבא קניון G",   # G = ג׳י בכפר סבא
+        "שילב ג'י כפס":               "שילב כפר סבא קניון G",
+        "שילב רננים":                  "שילב רעננה קניון רננים", # רננים = רעננה
         "שילב שער ראשון":              "שילב שער ראשון",
+        "בית שילב":                    "שילב בני ברק אילון",
+        "בית שילב אילון":              "שילב בני ברק אילון",
         # מכבי — סדר הפוך
         "ראש העין הציונות מכבי פארם":   "מכבי פארם ראש העין הציונות",
         "ראשון לציון מזרח - מכבי פארם ראשון לציון מזרח": "מכבי פארם ראשון לציון מזרח",
@@ -680,6 +690,7 @@ def build_context(user_msg, stores, deliveries, notes, visits):
 
         lines.append(f"📍 מסלול באזור {mentioned_city} ({len(relevant)} חנויות) — {city_dist:.0f} ק\"מ מהוד השרון:")
         lines.append(f"⬇️ סדר: מקובץ לפי עיר, בכל עיר מהרחוק לקרוב — יוצאים רחוק ומתקרבים הביתה")
+        lines.append(f"⚠️ הנחיה: הצג את הסטטוס (✅/⚠️/🔴) שמופיע לפני כל חנות בדיוק כפי שהוא — אל תשנה!")
         prev_city_r = None
         for i, s in enumerate(relevant, 1):
             raw = last_visit_raw(s)
@@ -690,7 +701,8 @@ def build_context(user_msg, stores, deliveries, notes, visits):
                 lines.append(f"\n🏙️ {city_label} (~{d:.0f} ק\"מ):")
                 prev_city_r = city_label
             addr = s.get("address","")
-            lines.append(f"  {i}. {s['name']}{' | '+addr if addr else ''} | {status}")
+            # סטטוס קודם לשם — כך Claude לא יכול לפספס אותו
+            lines.append(f"  {i}. [{status}] {s['name']}{' | '+addr if addr else ''}")
 
     elif is_route_question(user_msg):
         # מסלול יומי כללי — מינימום 10 חנויות, מקובץ לפי עיר
@@ -717,7 +729,7 @@ def build_context(user_msg, stores, deliveries, notes, visits):
             if city != prev_city:
                 lines.append(f"\n📍 {city} (~{dist:.0f} ק\"מ):")
                 prev_city = city
-            lines.append(f"  • {s['name']} | {status}")
+            lines.append(f"  • [{status}] {s['name']}")
     else:
         by_city = {}
         for s in stores:
@@ -791,7 +803,8 @@ def ask_claude(user_msg, context_text, chat_history):
 4. אסור לתת המלצות על ביקורים אלא אם המשתמש מבקש במפורש "מה לבקר מחר" או "מה דחוף"
 5. תעודת משלוח = סחורה שנשלחה מהמחסן — לא ביקור של המשתמש!
 6. ⛔ אסור בהחלט לומר "אין לי נתונים על ערים אחרות" או "שלח לי רשימת חנויות" — יש לך נתונים על 350+ חנויות בכל הארץ! אם לא מופיעות חנויות בנתונים — זה כי אין לנו חנויות שם, לא כי חסר מידע
-7. אם שאלו על אזור ויש מעט חנויות — הצג מה שיש וציין שזה מה שיש באזור זה
+7. ⛔ חשוב מאוד: כשמוצג סטטוס [✅ ...] או [⚠️ ...] או [🔴 ...] לפני שם חנות — חובה להציג את הסמל הזה בדיוק! אסור להשמיט או לשנות סטטוסים!
+8. אם שאלו על אזור ויש מעט חנויות — הצג מה שיש וציין שזה מה שיש באזור זה
 
 כללים נוספים:
 - ⚠️ = לא בוקר יותר מחודש
