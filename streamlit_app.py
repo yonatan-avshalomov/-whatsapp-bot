@@ -6,8 +6,19 @@ import os
 import json
 import re
 import math
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+
+# שעון ישראל — Render רץ על UTC
+ISRAEL_TZ = timezone(timedelta(hours=3))
+
+def now_il():
+    """datetime נוכחי בשעון ישראל."""
+    return datetime.now(ISRAEL_TZ)
+
+def today_il():
+    """תאריך היום בפורמט DD/MM/YY לפי שעון ישראל."""
+    return now_il().strftime("%d/%m/%y")
 
 load_dotenv()
 
@@ -237,6 +248,8 @@ def get_stores():
                         "address": row.get("address", "").strip(),
                         "chain":   row.get("chain", "").strip(),
                         "phone":   row.get("phone", "").strip(),
+                        "lat":     row.get("lat", "").strip(),
+                        "lon":     row.get("lon", "").strip(),
                     })
             if stores:
                 return stores
@@ -363,24 +376,54 @@ def save_visit_to_github(date, store, city, status, notes=""):
         return False
 
 
+# ── ניקוי שמות סניפים מסנזי ──────────────────────────────
+def clean_senzey_branch(branch: str) -> str:
+    """מסיר מספרי הזמנה וזבל מסנזי: 'מכבי פארם ראש העין הזמנה-107011388' → 'מכבי פארם ראש העין'"""
+    branch = re.sub(r'הזמנה[\s\-]*[\-\s]*\d+', '', branch)
+    branch = re.sub(r'\s*-\s*$', '', branch)
+    branch = re.sub(r'\s{2,}', ' ', branch).strip()
+    branch = branch.replace('מכבי שירותי בריאות', 'מכבי פארם')
+    branch = re.sub(r'(מכבי פארם)\s*-\s*', r'\1 ', branch)
+    return branch.strip()
+
+
+def format_date(raw: str) -> str:
+    """'14/05/26 13:31' → '14/05 13:31' להצגה קצרה."""
+    try:
+        parts = raw.split()
+        date_parts = parts[0].split("/")   # DD/MM/YY
+        time_part  = parts[1] if len(parts) > 1 else ""
+        return f"{date_parts[0]}/{date_parts[1]} {time_part}".strip()
+    except Exception:
+        return raw
+
+
 # ── בניית הקשר לשיחה ─────────────────────────────────────
 def build_context(user_msg, stores, deliveries, notes, visits):
-    today = datetime.now().strftime("%d/%m/%y")
+    today = today_il()
     lines = []
 
     # חפש עיר בהודעה
     mentioned_city = next((s["city"] for s in stores if s["city"] and s["city"] in user_msg), None)
 
-    # חנויות
+    # מיפוי מהיר: שם סניף נוקה → תאריך אחרון (מחושב פעם אחת לכל ה-context)
+    branch_last_date: dict[str, str] = {}
+    for d in deliveries:
+        cleaned = clean_senzey_branch(d.get("branch", ""))
+        date    = d.get("date", "")
+        if cleaned and (cleaned not in branch_last_date or date > branch_last_date[cleaned]):
+            branch_last_date[cleaned] = date
+
+    # התאמת חנות לתעודת משלוח — מדויקת יותר
     def last_delivery(store):
-        name_words = [w for w in store["name"].split() if len(w) > 2]
+        store_name = store["name"].strip()
         best = None
-        for d in deliveries:
-            branch = d.get("branch", "")
-            if any(w in branch for w in name_words):
-                if best is None or d["date"] > best:
-                    best = d["date"]
-        return best
+        for cleaned, date in branch_last_date.items():
+            # התאמה: שם החנות נמצא בסניף הנוקה, או הסניף הנוקה נמצא בשם החנות
+            if store_name in cleaned or cleaned in store_name:
+                if best is None or date > best:
+                    best = date
+        return format_date(best) if best else None
 
     if mentioned_city:
         # כל החנויות בעיר הזו — ממוינות לפי מיקום GPS מדויק בתוך העיר
@@ -478,7 +521,7 @@ def is_history_question(msg):
 
 def ask_claude(user_msg, context_text, chat_history):
     try:
-        today = datetime.now().strftime("%d/%m/%Y")
+        today = now_il().strftime("%d/%m/%Y")
         system_prompt = f"""אתה עוזר אישי חכם לניהול רשת חנויות בישראל.
 ענה תמיד בעברית, קצר וברור. השתמש בבוליטים כשיש רשימות.
 תאריך היום: {today}
@@ -568,7 +611,7 @@ with tab1:
 
                 # שאלות היסטוריה — תשובה ישירה מהנתונים, ללא Claude
                 if is_history_question(prompt):
-                    today_str = datetime.now().strftime("%d/%m/%y")
+                    today_str = today_il()
                     today_vis = [v for v in visits if v.get("date","").startswith(today_str)]
                     today_del = [d for d in deliveries if d.get("date","").startswith(today_str)]
 
@@ -620,7 +663,7 @@ with tab2:
 
     if st.button("💾 שמור הערה", type="primary"):
         if selected_store and note_text:
-            today_str = datetime.now().strftime("%d/%m/%y")
+            today_str = today_il()
             city_val  = selected_city or next((s["city"] for s in stores if s["name"] == selected_store), "")
             full_note = f"[{note_type}] {note_text}"
 
@@ -663,7 +706,7 @@ with tab2:
 with tab3:
     st.subheader("📊 סיכום היום")
 
-    today_str  = datetime.now().strftime("%d/%m/%y")
+    today_str  = today_il()
     deliveries = get_deliveries()
     visits     = get_manual_visits()
     notes      = get_notes()
@@ -680,7 +723,10 @@ with tab3:
     if today_del:
         st.subheader("🚚 תעודות משלוח")
         for d in today_del:
-            st.markdown(f"• **{d.get('date','')[6:]}** — {d.get('branch','')}")
+            raw   = d.get('branch', '')
+            clean = clean_senzey_branch(raw)
+            time  = d.get('date','')[9:14]   # HH:MM
+            st.markdown(f"• **{time}** — {clean}")
 
     if today_vis:
         st.subheader("👣 ביקורים")
