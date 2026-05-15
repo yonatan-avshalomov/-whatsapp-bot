@@ -915,7 +915,7 @@ def ask_claude(user_msg, context_text, chat_history):
 
 st.title("🏪 ניהול חנויות")
 
-tab1, tab2, tab3 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום"])
+tab1, tab2, tab3, tab4 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה"])
 
 
 # ════════════════════════════
@@ -1106,3 +1106,237 @@ with tab3:
         get_notes.clear()
         get_manual_visits.clear()
         st.rerun()
+
+
+# ════════════════════════════
+# לשונית 4 — מפה
+# ════════════════════════════
+def build_store_map_html(stores_list, deliveries_list, visits_list) -> str:
+    """מייצר HTML של מפת Leaflet עם כל החנויות + סטטוס ביקור."""
+
+    # ── חשב תאריך אחרון לכל סניף מסנזי ──────────────────────
+    branch_last: dict = {}
+    for d in deliveries_list:
+        cl = clean_senzey_branch(d.get("branch", ""))
+        dt = d.get("date", "")
+        if cl and (cl not in branch_last or dt > branch_last[cl]):
+            branch_last[cl] = dt
+
+    # ── ביקורים ידניים ────────────────────────────────────────
+    manual_last: dict = {}
+    for v in visits_list:
+        sv = v.get("store", "").strip()
+        dv = v.get("date", "")
+        if sv and dv:
+            try:
+                p = dv.split("/")
+                cmp = f"20{p[2]}-{p[1]}-{p[0]} 00:00"
+            except Exception:
+                cmp = dv
+            if sv not in manual_last or cmp > manual_last[sv][1]:
+                manual_last[sv] = (dv, cmp)
+
+    def last_raw(store_name: str):
+        # סנזי — התאמה פשוטה
+        chain = ""
+        if "שילב"  in store_name: chain = "שילב"
+        elif "מכבי" in store_name: chain = "מכבי"
+        elif "ניצת" in store_name or "הדובדבן" in store_name: chain = "ניצת"
+
+        senz_best = None
+        senz_cmp  = None
+        for br, dt in branch_last.items():
+            bc = ""
+            if "שילב"  in br: bc = "שילב"
+            elif "מכבי" in br: bc = "מכבי"
+            elif "ניצת" in br or "הדובדבן" in br: bc = "ניצת"
+            if chain and bc and chain != bc:
+                continue
+            if store_name in br or br in store_name:
+                try:
+                    sp = dt.split(); dp = sp[0].split("/"); tp = sp[1] if len(sp)>1 else "00:00"
+                    cmp = f"20{dp[2]}-{dp[1]}-{dp[0]} {tp}"
+                except Exception:
+                    cmp = dt
+                if senz_cmp is None or cmp > senz_cmp:
+                    senz_best, senz_cmp = dt, cmp
+
+        man = manual_last.get(store_name)
+        if man and senz_cmp:
+            return man[0] if man[1] > senz_cmp else senz_best
+        if man:
+            return man[0]
+        return senz_best
+
+    def status_color(raw):
+        """green / orange / red based on days since last visit."""
+        if not raw:
+            return "#CC2200"
+        try:
+            fmt = "%d/%m/%y %H:%M" if "/" in raw and len(raw) >= 14 else "%Y-%m-%d"
+            src = raw[:14] if "/" in raw else raw[:10]
+            dt  = datetime.strptime(src, fmt if "/" in raw else "%Y-%m-%d")
+            diff = (now_il().replace(tzinfo=None) - dt).days
+        except Exception:
+            return "#CC2200"
+        if diff <= 7:  return "#22AA22"
+        if diff <= 21: return "#FF8800"
+        if diff <= 60: return "#FF8800"
+        return "#CC2200"
+
+    CHAIN_FILL = {"שילב": "#1F4E79", "מכבי": "#2E7D32", "ניצת": "#C55A11"}
+
+    def chain_fill(chain):
+        for k, v in CHAIN_FILL.items():
+            if k in (chain or ""):
+                return v
+        return "#555555"
+
+    markers = []
+    for s in stores_list:
+        try:
+            lat = float(s.get("lat") or 0)
+            lon = float(s.get("lon") or 0)
+        except Exception:
+            continue
+        if abs(lat) < 0.001 or abs(lon) < 0.001:
+            continue
+        name   = s.get("name", "")
+        raw    = last_raw(name)
+        s_txt  = visit_status(raw) if raw else "🔴 לא בוקר"
+        ring   = status_color(raw)
+        fill   = chain_fill(s.get("chain", ""))
+        addr   = s.get("address", "")
+        markers.append({
+            "lat": round(lat, 5), "lon": round(lon, 5),
+            "name": name, "city": s.get("city",""),
+            "addr": addr, "chain": s.get("chain","") or "פרטי",
+            "fill": fill, "ring": ring, "status": s_txt,
+        })
+
+    mj = json.dumps(markers, ensure_ascii=False)
+
+    return f"""<!DOCTYPE html>
+<html dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body,html{{margin:0;padding:0;font-family:Arial,sans-serif}}
+    #map{{width:100%;height:560px}}
+    .legend{{background:white;padding:10px 12px;border-radius:6px;
+             font-size:12px;line-height:22px;direction:rtl;
+             box-shadow:0 2px 6px rgba(0,0,0,.25)}}
+    .dot{{display:inline-block;width:11px;height:11px;
+          border-radius:50%;margin-left:5px;vertical-align:middle}}
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+const DATA = {mj};
+const map = L.map('map').setView([32.0,34.9],8);
+L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
+  {{attribution:'© OpenStreetMap',maxZoom:18}}).addTo(map);
+
+let allMarkers=[], curFilter='all';
+
+function buildIcon(fill,ring){{
+  return L.divIcon({{
+    className:'',
+    html:`<div style="background:${{fill}};width:12px;height:12px;border-radius:50%;
+          border:3px solid ${{ring}};box-shadow:0 0 4px rgba(0,0,0,.45)"></div>`,
+    iconSize:[18,18],iconAnchor:[9,9],popupAnchor:[0,-9]
+  }});
+}}
+
+DATA.forEach(m=>{{
+  const mk = L.marker([m.lat,m.lon],{{icon:buildIcon(m.fill,m.ring)}});
+  const popup = `<div dir="rtl" style="min-width:180px">
+    <b style="font-size:14px">${{m.name}}</b><br>
+    📍 ${{m.city}}${{m.addr?' — '+m.addr:''}}<br>
+    <span style="font-size:13px">${{m.status}}</span>
+  </div>`;
+  mk.bindPopup(popup);
+  mk._chain = m.chain;
+  allMarkers.push(mk);
+  mk.addTo(map);
+}});
+
+function filterChain(chain){{
+  curFilter = chain;
+  allMarkers.forEach(mk=>{{
+    const show = (chain==='all') || mk._chain.includes(chain);
+    if(show) mk.addTo(map); else map.removeLayer(mk);
+  }});
+  document.querySelectorAll('.filter-btn').forEach(b=>
+    b.style.fontWeight = b.dataset.chain===chain?'bold':'normal');
+}}
+
+// Filter bar
+const ctrl = L.control({{position:'topleft'}});
+ctrl.onAdd=()=>{{
+  const d=L.DomUtil.create('div');
+  d.innerHTML=`<div style="background:white;padding:6px 10px;border-radius:6px;
+    box-shadow:0 2px 6px rgba(0,0,0,.2);display:flex;gap:8px;direction:rtl">
+    <button class="filter-btn" data-chain="all"    onclick="filterChain('all')"    style="font-weight:bold;cursor:pointer;border:1px solid #ccc;border-radius:4px;padding:3px 8px;background:#1F4E79;color:white">הכל</button>
+    <button class="filter-btn" data-chain="שילב"  onclick="filterChain('שילב')"   style="cursor:pointer;border:1px solid #ccc;border-radius:4px;padding:3px 8px;background:#3579b0;color:white">שילב</button>
+    <button class="filter-btn" data-chain="מכבי"  onclick="filterChain('מכבי')"   style="cursor:pointer;border:1px solid #ccc;border-radius:4px;padding:3px 8px;background:#2E7D32;color:white">מכבי</button>
+    <button class="filter-btn" data-chain="ניצת"  onclick="filterChain('ניצת')"   style="cursor:pointer;border:1px solid #ccc;border-radius:4px;padding:3px 8px;background:#C55A11;color:white">ניצת</button>
+  </div>`;
+  L.DomEvent.disableClickPropagation(d);
+  return d;
+}};
+ctrl.addTo(map);
+
+// Legend
+const leg=L.control({{position:'bottomright'}});
+leg.onAdd=()=>{{
+  const d=L.DomUtil.create('div','legend');
+  d.innerHTML=`<b>מקרא</b><br>
+    <span class='dot' style='background:#1F4E79'></span> שילב<br>
+    <span class='dot' style='background:#2E7D32'></span> מכבי פארם<br>
+    <span class='dot' style='background:#C55A11'></span> ניצת הדובדבן<br>
+    <span class='dot' style='background:#555'></span> פרטי<br>
+    <hr style='margin:5px 0;border-color:#ddd'>
+    <span class='dot' style='border:2px solid #22AA22;background:transparent'></span> ✅ פחות משבוע<br>
+    <span class='dot' style='border:2px solid #FF8800;background:transparent'></span> ⚠️ שבוע–חודש<br>
+    <span class='dot' style='border:2px solid #CC2200;background:transparent'></span> 🔴 לא בוקר<br>
+    <hr style='margin:5px 0;border-color:#ddd'>
+    <small style='color:#666'>{len(markers)} חנויות</small>`;
+  return d;
+}};
+leg.addTo(map);
+</script>
+</body>
+</html>"""
+
+
+with tab4:
+    st.subheader("🗺️ מפת חנויות")
+
+    col_a, col_b = st.columns([3, 1])
+    with col_b:
+        if st.button("🔄 רענן מפה"):
+            get_stores.clear()
+            get_deliveries.clear()
+            get_manual_visits.clear()
+            st.rerun()
+
+    with st.spinner("טוען מפה..."):
+        map_stores     = get_stores()
+        map_deliveries = get_deliveries()
+        map_visits     = get_manual_visits()
+        map_html = build_store_map_html(map_stores, map_deliveries, map_visits)
+
+    st.components.v1.html(map_html, height=580, scrolling=False)
+
+    # סיכום מהיר מתחת למפה
+    st.caption(
+        f"🔵 שילב: {sum(1 for s in map_stores if 'שילב' in s.get('chain',''))} | "
+        f"🟢 מכבי: {sum(1 for s in map_stores if 'מכבי' in s.get('chain',''))} | "
+        f"🟠 ניצת: {sum(1 for s in map_stores if 'ניצת' in s.get('chain','') or 'הדובדבן' in s.get('chain',''))} | "
+        f"⚫ פרטי: {sum(1 for s in map_stores if not s.get('chain',''))} | "
+        f"סה\"כ {len(map_stores)} חנויות"
+    )
