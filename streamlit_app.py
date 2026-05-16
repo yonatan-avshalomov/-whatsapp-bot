@@ -1534,29 +1534,55 @@ with tab4:
     # ── ייצוא KML ל-Google My Maps ───────────────────────────
     st.divider()
     st.markdown("#### 📥 ייצוא ל-Google My Maps")
-    col_kml1, col_kml2 = st.columns([2, 3])
+    col_kml1, col_kml2 = st.columns(2)
     with col_kml1:
-        with st.spinner("בונה קובץ KML..."):
-            try:
-                _kml_vstats = get_all_visit_stats(map_stores, map_deliveries, map_visits)
-                _kml_bytes  = build_kml(map_stores, _kml_vstats)
-                _kml_name   = build_kml_filename()
-                st.download_button(
-                    label="📥 הורד KML (Google My Maps)",
-                    data=_kml_bytes,
-                    file_name=_kml_name,
-                    mime="application/vnd.google-earth.kml+xml",
-                    use_container_width=True,
-                )
-            except Exception as _kml_err:
-                st.error(f"שגיאה בבניית KML: {_kml_err}")
+        # ── CSV לגוגל מפס (גוגל מגאוקד לבד) ──
+        try:
+            _csv_buf = io.StringIO()
+            _csv_writer = csv.writer(_csv_buf)
+            _csv_writer.writerow(["שם", "עיר", "רשת", "כתובת", "טלפון"])
+            for _s in map_stores:
+                _csv_writer.writerow([
+                    _s.get("name", ""),
+                    _s.get("city", ""),
+                    _s.get("chain", ""),
+                    _s.get("address", ""),
+                    _s.get("phone", ""),
+                ])
+            _csv_bytes = _csv_buf.getvalue().encode("utf-8-sig")
+            _csv_name  = f"stores_{datetime.now(ISRAEL_TZ).strftime('%Y%m%d')}.csv"
+            st.download_button(
+                label="📥 הורד CSV לגוגל מפס שלי",
+                data=_csv_bytes,
+                file_name=_csv_name,
+                mime="text/csv",
+                use_container_width=True,
+            )
+        except Exception as _csv_err:
+            st.error(f"שגיאה בבניית CSV: {_csv_err}")
+
     with col_kml2:
-        st.info(
-            "**איך לייבא ב-Google My Maps:**\n"
-            "1. פתח [maps.google.com/maps/d](https://www.google.com/maps/d/) ← צור מפה חדשה\n"
-            "2. לחץ **ייבא** ← העלה את קובץ ה-KML\n"
-            "3. בחר את עמודת **השם** ← כל הסניפים מופיעים עם צבעים לפי רשת"
-        )
+        try:
+            _kml_vstats = get_all_visit_stats(map_stores, map_deliveries, map_visits)
+            _kml_bytes  = build_kml(map_stores, _kml_vstats)
+            _kml_name   = build_kml_filename()
+            st.download_button(
+                label="📥 הורד KML (עם צבעים לפי רשת)",
+                data=_kml_bytes,
+                file_name=_kml_name,
+                mime="application/vnd.google-earth.kml+xml",
+                use_container_width=True,
+            )
+        except Exception as _kml_err:
+            st.error(f"שגיאה בבניית KML: {_kml_err}")
+
+    st.info(
+        "**איך לייבא CSV ב-Google My Maps:**\n"
+        "1. פתח [maps.google.com/maps/d](https://www.google.com/maps/d/) ← צור מפה חדשה\n"
+        "2. לחץ **ייבא** ← העלה את קובץ ה-CSV\n"
+        "3. בחר עמודת **כתובת** לגיאוקודינג ועמודת **שם** לתצוגה\n"
+        "4. גוגל תמקם כל חנות אוטומטית לפי הכתובת שלה ✅"
+    )
 
 
 # ════════════════════════════════════════════
