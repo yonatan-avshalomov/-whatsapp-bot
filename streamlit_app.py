@@ -8,6 +8,8 @@ import re
 import math
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+import openai as _openai_mod
+import anthropic as _ant_mod
 from visit_tracker import get_all_visit_stats, urgency_label, urgency_color_hex, get_overdue_stores, get_never_visited, get_unmatched_branches
 from route_planner import optimize_route, build_gmaps_url, build_waze_url, build_qr_code, total_distance, filter_stores
 from database import db as supabase_db
@@ -29,18 +31,18 @@ load_dotenv()
 # ── מפתחות ───────────────────────────────────────────────
 try:
     ANTHROPIC_API_KEY    = st.secrets["ANTHROPIC_API_KEY"]
-    GOOGLE_SHEET_ID      = st.secrets["GOOGLE_SHEET_ID"]
     GITHUB_TOKEN         = st.secrets.get("GITHUB_TOKEN", "")
     GOOGLE_MAPS_API_KEY  = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
     SUPABASE_URL         = st.secrets.get("SUPABASE_URL", "")
     SUPABASE_ANON_KEY    = st.secrets.get("SUPABASE_ANON_KEY", "")
+    OPENAI_API_KEY       = st.secrets.get("OPENAI_API_KEY", "")
 except Exception:
     ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
-    GOOGLE_SHEET_ID      = os.getenv("GOOGLE_SHEET_ID", "")
     GITHUB_TOKEN         = os.getenv("GITHUB_TOKEN", "")
     GOOGLE_MAPS_API_KEY  = os.getenv("GOOGLE_MAPS_API_KEY", "")
     SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
     SUPABASE_ANON_KEY    = os.getenv("SUPABASE_ANON_KEY", "")
+    OPENAI_API_KEY       = os.getenv("OPENAI_API_KEY", "")
 
 # העבר credentials ל-Supabase client
 if SUPABASE_URL:
@@ -70,11 +72,27 @@ st.markdown("""
         .stTextInput input, .stTextArea textarea, .stSelectbox select {
             direction: rtl; text-align: right;
         }
-        .stButton button { width: 100%; }
+        /* מובייל — כפתורים גדולים יותר */
+        .stButton button { width: 100%; min-height: 44px; font-size: 16px; }
+        /* כרטיס הערה */
         .note-card {
             background: #f0f2f6; border-radius: 10px;
             padding: 10px; margin: 5px 0; direction: rtl;
         }
+        /* מובייל — tabs נגללים */
+        .stTabs [data-baseweb="tab-list"] {
+            overflow-x: auto; flex-wrap: nowrap;
+        }
+        .stTabs [data-baseweb="tab"] {
+            white-space: nowrap; min-width: fit-content;
+            padding: 8px 12px; font-size: 14px;
+        }
+        /* מובייל — metric קומפקטי */
+        [data-testid="metric-container"] {
+            padding: 8px 4px;
+        }
+        /* iframe מפה תמיד 100% רוחב */
+        iframe { max-width: 100% !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -298,9 +316,8 @@ def get_deliveries():
         url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/senzey_data.csv"
         r = requests.get(url, timeout=10)
         text = r.content.decode("utf-8-sig")
-        rows = list(csv.DictReader(io.StringIO(text)))
-        return rows
-    except:
+        return list(csv.DictReader(io.StringIO(text)))
+    except Exception:
         return []
 
 
@@ -350,17 +367,16 @@ def get_aliases() -> dict:
 
 
 @st.cache_data(ttl=300)
-def get_visit_stats_cached(stores_key: int, deliveries_key: int,
-                            manual_key: int, aliases_key: int) -> dict:
-    """מחשב סטטיסטיקות ביקורים עם cache — קריאה יקרה, מוקפאת 5 דקות."""
-    return get_all_visit_stats(get_stores(), get_deliveries(),
-                                get_manual_visits(), aliases=get_aliases())
+def get_visit_stats_cached(stores: list, deliveries: list,
+                            manual: list, aliases: dict) -> dict:
+    """מחשב סטטיסטיקות ביקורים עם cache — מוקפא 5 דקות."""
+    return get_all_visit_stats(stores, deliveries, manual, aliases=aliases)
 
 
 @st.cache_data(ttl=600)
-def get_unmatched_cached(deliveries_key: int, stores_key: int, aliases_key: int) -> list:
-    """מחשב תעודות לא מזוהות עם cache — קריאה כבדה, מוקפאת 10 דקות."""
-    return get_unmatched_branches(get_deliveries(), get_stores(), get_aliases())
+def get_unmatched_cached(deliveries: list, stores: list, aliases: dict) -> list:
+    """מחשב תעודות לא מזוהות עם cache — מוקפא 10 דקות."""
+    return get_unmatched_branches(deliveries, stores, aliases)
 
 
 def save_alias_to_db(branch_raw: str, store_name: str) -> bool:
@@ -374,58 +390,51 @@ def save_alias_to_db(branch_raw: str, store_name: str) -> bool:
         return False
 
 
-def save_note_to_github(date, store, city, note):
-    """שומר הערה — Supabase ראשון, GitHub כגיבוי."""
-    # ── Supabase (מהיר) ──
-    ok = supabase_db.add_note(date, store, city, note)
-    if ok:
-        return True
-    # ── GitHub fallback ──
+def _github_update_file(filename: str, transform_fn, commit_msg: str) -> bool:
+    """עוזר גנרי לעדכון קובץ ב-GitHub: GET → decode → transform → encode → PUT."""
     if not GITHUB_TOKEN:
         return False
+    import base64
+    api     = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}",
+               "Accept": "application/vnd.github.v3+json"}
     try:
-        import base64
-        api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{NOTES_FILE}"
-        headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-        r = requests.get(api, headers=headers)
+        r    = requests.get(api, headers=headers)
         data = r.json()
+        sha  = data.get("sha", "")
         current = base64.b64decode(data["content"]).decode("utf-8-sig") if "content" in data else ""
-        sha = data.get("sha", "")
-        new_line = f'\n{date},{store},{city},"{note}"'
-        updated = current.rstrip() + new_line + "\n"
-        payload = {"message": f"הערה: {store}",
-                   "content": base64.b64encode(updated.encode("utf-8")).decode(), "sha": sha}
+        updated = transform_fn(current)
+        payload = {"message": commit_msg,
+                   "content": base64.b64encode(updated.encode("utf-8")).decode(),
+                   "sha": sha}
         r = requests.put(api, headers=headers, json=payload)
         return r.status_code in [200, 201]
     except Exception:
         return False
+
+
+def save_note_to_github(date, store, city, note):
+    """שומר הערה — Supabase ראשון, GitHub כגיבוי."""
+    if supabase_db.add_note(date, store, city, note):
+        return True
+    new_line = f'\n{date},{store},{city},"{note}"'
+    return _github_update_file(
+        NOTES_FILE,
+        lambda c: c.rstrip() + new_line + "\n",
+        f"הערה: {store}"
+    )
 
 
 def save_visit_to_github(date, store, city, status, notes=""):
     """שומר ביקור — Supabase ראשון, GitHub כגיבוי."""
-    # ── Supabase (מהיר) ──
-    ok = supabase_db.add_visit(date, store, city, status, notes)
-    if ok:
+    if supabase_db.add_visit(date, store, city, status, notes):
         return True
-    # ── GitHub fallback ──
-    if not GITHUB_TOKEN:
-        return False
-    try:
-        import base64
-        api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{VISITS_FILE}"
-        headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-        r = requests.get(api, headers=headers)
-        data = r.json()
-        current = base64.b64decode(data["content"]).decode("utf-8-sig") if "content" in data else ""
-        sha = data.get("sha", "")
-        new_line = f'\n{date},{store},{city},{status},{notes}'
-        updated = current.rstrip() + new_line + "\n"
-        payload = {"message": f"ביקור: {store}",
-                   "content": base64.b64encode(updated.encode("utf-8")).decode(), "sha": sha}
-        r = requests.put(api, headers=headers, json=payload)
-        return r.status_code in [200, 201]
-    except Exception:
-        return False
+    new_line = f'\n{date},{store},{city},{status},{notes}'
+    return _github_update_file(
+        VISITS_FILE,
+        lambda c: c.rstrip() + new_line + "\n",
+        f"ביקור: {store}"
+    )
 
 
 # ── Rule A: בדיקת כפילויות (fuzzy matching) ──────────────
@@ -1082,7 +1091,10 @@ def ask_claude(user_msg, context_text, chat_history):
 
 st.title("🏪 ניהול חנויות")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה", "➕ חנות חדשה", "📅 מעקב ביקורים", "🧭 מסלול יומי", "📍 תקן מיקום"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "💬 שיחה", "📝 הערה", "📊 היום", "🗺️ מפה",
+    "➕ חנות", "📅 ביקורים", "🧭 מסלול", "📍 מיקום"
+])
 
 
 # ════════════════════════════
@@ -1188,10 +1200,7 @@ with tab2:
         if voice_file is not None:
             with st.spinner("🎙️ מתמלל הקלטה..."):
                 try:
-                    import openai as _openai_mod
-                    _oa_client = _openai_mod.OpenAI(
-                        api_key=st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-                    )
+                    _oa_client = _openai_mod.OpenAI(api_key=OPENAI_API_KEY)
                     audio_bytes = voice_file.read()
                     # Whisper API requires a file-like object with a name
                     import io as _io
@@ -1207,8 +1216,7 @@ with tab2:
 
                     # ── Claude: חלץ חנות + הערה ──
                     with st.spinner("🤖 מזהה חנות..."):
-                        import anthropic as _ant
-                        _ant_client = _ant.Anthropic(api_key=ANTHROPIC_API_KEY)
+                        _ant_client = _ant_mod.Anthropic(api_key=ANTHROPIC_API_KEY)
                         store_list_short = "\n".join(
                             f"- {s['name']} ({s.get('city','')})"
                             for s in stores[:200]
@@ -1380,10 +1388,10 @@ with tab3:
     today_vis = [v for v in visits    if v.get("date","") == today_str or v.get("date","").startswith(today_str)]
     today_not = [n for n in notes     if n.get("date","") == today_str or n.get("date","").startswith(today_str)]
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     col1.metric("תעודות משלוח", len(today_del))
     col2.metric("ביקורים ידניים", len(today_vis))
-    col3.metric("הערות", len(today_not))
+    st.metric("הערות", len(today_not))
 
     if today_del:
         st.subheader("🚚 תעודות משלוח")
@@ -1423,6 +1431,7 @@ with tab3:
 # ════════════════════════════
 # לשונית 4 — מפה
 # ════════════════════════════
+@st.cache_data(ttl=180)
 def build_store_map_html(stores_list, deliveries_list, visits_list) -> str:
     """מייצר HTML של מפת Leaflet עם כל החנויות + סטטוס ביקור."""
 
@@ -1810,8 +1819,7 @@ with tab6:
         v_manual     = get_manual_visits()
         v_aliases    = get_aliases()
         # cache key — מספר שורות כ-proxy לשינוי תוכן
-        _vk = (len(v_stores), len(v_deliveries), len(v_manual), len(v_aliases))
-        visit_stats  = get_visit_stats_cached(*_vk)
+        visit_stats  = get_visit_stats_cached(v_stores, v_deliveries, v_manual, v_aliases)
 
     # ── נתונים כלליים ──────────────────────────────
     total       = len(v_stores)
@@ -1822,9 +1830,10 @@ with tab6:
     warning     = [s for s in warning if s["days_since"] < 45]
 
     # ── כרטיסי סיכום ────────────────────────────────
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2 = st.columns(2)
     col1.metric("סה\"כ חנויות", total)
     col2.metric("✅ בוקרו", visited_cnt)
+    col3, col4 = st.columns(2)
     col3.metric("🔴 דחוף (45+ יום)", len(overdue))
     col4.metric("⚫ לא בוקרו מעולם", never_cnt)
 
@@ -2002,8 +2011,7 @@ with tab6:
     unmatched_branches = []
     if st.session_state.get("show_unmatched"):
         with st.spinner("מחפש תעודות לא מזוהות..."):
-            _uk = (len(v_deliveries), len(v_stores), len(v_aliases))
-            unmatched_branches = get_unmatched_cached(*_uk)
+            unmatched_branches = get_unmatched_cached(v_deliveries, v_stores, v_aliases)
 
     if st.session_state.get("show_unmatched") and not unmatched_branches:
         st.success("✅ כל התעודות זוהו! אין רשומות לא מזוהות.")
@@ -2235,7 +2243,7 @@ with tab8:
                 fill_opacity=0.2
             ).add_to(m)
 
-            map_data = st_folium(m, width=700, height=450, key="fix_map")
+            map_data = st_folium(m, use_container_width=True, height=420, key="fix_map")
 
             # ── עיבוד לחיצה ──────────────────────────────
             new_lat = new_lon = None
