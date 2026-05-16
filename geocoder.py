@@ -1,0 +1,287 @@
+"""
+geocoder.py
+===========
+מודול מרכזי לגיאוקודינג — Google Maps Geocoding API עם cache מקומי.
+
+שימוש:
+    from geocoder import geocode, geocode_batch
+
+    result = geocode("וייצמן 14", "תל אביב")
+    # → {"lat": 32.08, "lon": 34.79, "formatted_address": "...", "place_id": "...", "source": "google"}
+
+עיצוב:
+    ┌──────────────────────────────────────────────┐
+    │  geocode(address, city)                       │
+    │       ↓                                       │
+    │  1. Cache hit? → return immediately           │
+    │  2. Google Maps API → parse result            │
+    │  3. Validate: in Israel? city match?          │
+    │  4. Save to cache → return result             │
+    │  5. Fallback: Nominatim (אם אין API Key)      │
+    └──────────────────────────────────────────────┘
+"""
+
+import os, json, time, math, logging
+from pathlib import Path
+from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── הגדרות ─────────────────────────────────────────────────────────────────
+CACHE_FILE    = Path(__file__).parent / "geocode_cache.json"
+LOG_FILE      = Path(__file__).parent / "geocode_log.txt"
+RATE_LIMIT    = 0.05   # שניות בין קריאות Google (20 req/sec בחינמי)
+NOM_RATE      = 1.2    # שניות בין קריאות Nominatim (חייב ≥1s)
+
+# גבולות ישראל (lat/lon bounding box)
+ISRAEL_BBOX = {"lat_min": 29.4, "lat_max": 33.4, "lon_min": 34.2, "lon_max": 35.9}
+
+logging.basicConfig(
+    filename=str(LOG_FILE), level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S", encoding="utf-8"
+)
+log = logging.getLogger(__name__)
+
+# ── Cache ───────────────────────────────────────────────────────────────────
+def _load_cache() -> dict:
+    if CACHE_FILE.exists():
+        try:
+            return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def _save_cache(cache: dict) -> None:
+    CACHE_FILE.write_text(
+        json.dumps(cache, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+def _cache_key(address: str, city: str) -> str:
+    return f"{address.strip()}|{city.strip()}".lower()
+
+# ── בדיקות תקינות ───────────────────────────────────────────────────────────
+def _in_israel(lat: float, lon: float) -> bool:
+    b = ISRAEL_BBOX
+    return b["lat_min"] <= lat <= b["lat_max"] and b["lon_min"] <= lon <= b["lon_max"]
+
+def haversine(lat1, lon1, lat2, lon2) -> float:
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat/2)**2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dlon/2)**2)
+    return R * 2 * math.asin(math.sqrt(a))
+
+# ── Google Maps ──────────────────────────────────────────────────────────────
+def _geocode_google(address: str, city: str, api_key: str) -> dict | None:
+    """
+    קוראת ל-Google Maps Geocoding API.
+    מחזירה dict עם lat, lon, formatted_address, place_id
+    או None אם נכשל.
+    """
+    import googlemaps
+
+    gmaps = googlemaps.Client(key=api_key)
+    query = f"{address}, {city}, Israel" if city else f"{address}, Israel"
+
+    try:
+        results = gmaps.geocode(query, language="he", region="il")
+    except Exception as e:
+        log.error(f"Google API error for '{query}': {e}")
+        return None
+
+    if not results:
+        log.warning(f"Google: no results for '{query}'")
+        return None
+
+    r    = results[0]
+    loc  = r["geometry"]["location"]
+    lat, lon = loc["lat"], loc["lng"]
+
+    if not _in_israel(lat, lon):
+        log.warning(f"Google: result outside Israel for '{query}' → {lat},{lon}")
+        return None
+
+    return {
+        "lat":               round(lat, 6),
+        "lon":               round(lon, 6),
+        "formatted_address": r.get("formatted_address", ""),
+        "place_id":          r.get("place_id", ""),
+        "source":            "google",
+        "geocoded_at":       datetime.now().strftime("%Y-%m-%d"),
+    }
+
+# ── Nominatim (fallback) ─────────────────────────────────────────────────────
+def _geocode_nominatim(address: str, city: str) -> dict | None:
+    """
+    Nominatim (OSM) כ-fallback חינמי אם אין Google API Key.
+    """
+    import requests
+
+    query = f"{address}, {city}, Israel" if city else f"{address}, Israel"
+    url   = "https://nominatim.openstreetmap.org/search"
+    params = {"q": query, "format": "json", "limit": 1,
+              "countrycodes": "il", "accept-language": "he"}
+    headers = {"User-Agent": "store-manager-geocoder/2.0"}
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        data = r.json()
+    except Exception as e:
+        log.error(f"Nominatim error for '{query}': {e}")
+        return None
+
+    if not data:
+        log.warning(f"Nominatim: no results for '{query}'")
+        return None
+
+    lat, lon = float(data[0]["lat"]), float(data[0]["lon"])
+
+    if not _in_israel(lat, lon):
+        log.warning(f"Nominatim: result outside Israel for '{query}' → {lat},{lon}")
+        return None
+
+    return {
+        "lat":               round(lat, 6),
+        "lon":               round(lon, 6),
+        "formatted_address": data[0].get("display_name", ""),
+        "place_id":          data[0].get("osm_id", ""),
+        "source":            "nominatim",
+        "geocoded_at":       datetime.now().strftime("%Y-%m-%d"),
+    }
+
+# ── פונקציה ראשית ────────────────────────────────────────────────────────────
+def geocode(address: str, city: str = "", force: bool = False) -> dict | None:
+    """
+    מחזיר קואורדינטות מדויקות לכתובת נתונה.
+
+    Parameters
+    ----------
+    address : str   כתובת הרחוב (ללא עיר)
+    city    : str   שם העיר בעברית
+    force   : bool  אם True — מתעלם מה-cache ומבצע קריאה חדשה
+
+    Returns
+    -------
+    dict עם:  lat, lon, formatted_address, place_id, source, geocoded_at
+    None      אם הגיאוקודינג נכשל
+    """
+    key   = _cache_key(address, city)
+    cache = _load_cache()
+
+    # ── Cache hit ──
+    if not force and key in cache:
+        log.info(f"Cache hit: '{address}, {city}'")
+        return cache[key]
+
+    api_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
+    # ── Google Maps ──
+    if api_key:
+        time.sleep(RATE_LIMIT)
+        result = _geocode_google(address, city, api_key)
+        if result:
+            cache[key] = result
+            _save_cache(cache)
+            log.info(f"Google OK: '{address}, {city}' → {result['lat']},{result['lon']}")
+            return result
+        log.warning(f"Google failed for '{address}, {city}' — trying Nominatim")
+
+    # ── Nominatim fallback ──
+    time.sleep(NOM_RATE)
+    result = _geocode_nominatim(address, city)
+    if result:
+        cache[key] = result
+        _save_cache(cache)
+        log.info(f"Nominatim OK: '{address}, {city}' → {result['lat']},{result['lon']}")
+        return result
+
+    log.error(f"FAILED all geocoders: '{address}, {city}'")
+    return None
+
+
+def geocode_batch(stores: list[dict], force: bool = False,
+                  skip_with_coords: bool = True) -> tuple[int, int, int]:
+    """
+    מריץ geocode על רשימת חנויות ומעדכן lat/lon/formatted_address בכל אחת.
+
+    Parameters
+    ----------
+    stores           : list[dict]  רשימת חנויות (כל אחת dict עם address, city, lat, lon)
+    force            : bool        אם True — מגאוקד מחדש גם חנויות עם קואורדינטות קיימות
+    skip_with_coords : bool        אם True — מדלג על חנויות שכבר יש להן lat/lon תקין
+
+    Returns
+    -------
+    (updated, skipped, failed) : tuple[int, int, int]
+    """
+    updated = skipped = failed = 0
+
+    for i, store in enumerate(stores, 1):
+        name    = store.get("name", "")
+        address = store.get("address", "").strip()
+        city    = store.get("city", "").strip()
+
+        # ── דלג אם כבר יש קואורדינטות ──
+        if skip_with_coords and not force:
+            try:
+                lat = float(store.get("lat") or 0)
+                lon = float(store.get("lon") or 0)
+                if lat > 0 and lon > 0:
+                    skipped += 1
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        # ── דלג אם אין כתובת ──
+        if not address:
+            print(f"[{i:3}] ⚠️  {name[:40]:<40} | אין כתובת — מדלג")
+            failed += 1
+            continue
+
+        print(f"[{i:3}] 🔍 {name[:40]:<40} | {address[:30]}", end=" ... ", flush=True)
+        result = geocode(address, city, force=force)
+
+        if result:
+            store["lat"] = str(result["lat"])
+            store["lon"] = str(result["lon"])
+            # שמור כתובת מנורמלת של Google אם עדיין אין כתובת טובה
+            if result.get("formatted_address") and result["source"] == "google":
+                store["formatted_address"] = result["formatted_address"]
+            updated += 1
+            src = "🗺️ Google" if result["source"] == "google" else "🌍 OSM"
+            print(f"✅ {src} → {result['lat']:.4f},{result['lon']:.4f}")
+        else:
+            failed += 1
+            print("❌ נכשל")
+
+    return updated, skipped, failed
+
+
+# ── הרצה ישירה (בדיקה מהירה) ────────────────────────────────────────────────
+if __name__ == "__main__":
+    import sys
+    sys.stdout.reconfigure(encoding="utf-8")
+
+    tests = [
+        ("וייצמן 14", "תל אביב"),
+        ("ביג רגבה", "נהריה"),
+        ("דרך העלייה 8", "חיפה"),
+        ("שמחה גולן 12", "חיפה"),
+        ("דרך עכו 192", "קרית ביאליק"),
+    ]
+
+    print("🔍 בדיקת Geocoder\n" + "="*50)
+    for addr, city in tests:
+        r = geocode(addr, city)
+        if r:
+            print(f"✅ {addr}, {city}")
+            print(f"   lat={r['lat']}, lon={r['lon']}")
+            print(f"   📍 {r['formatted_address'][:70]}")
+            print(f"   מקור: {r['source']}\n")
+        else:
+            print(f"❌ {addr}, {city} — נכשל\n")

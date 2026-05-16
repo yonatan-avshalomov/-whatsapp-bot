@@ -24,13 +24,15 @@ load_dotenv()
 
 # ── מפתחות ───────────────────────────────────────────────
 try:
-    ANTHROPIC_API_KEY = st.secrets["ANTHROPIC_API_KEY"]
-    GOOGLE_SHEET_ID   = st.secrets["GOOGLE_SHEET_ID"]
-    GITHUB_TOKEN      = st.secrets.get("GITHUB_TOKEN", "")
+    ANTHROPIC_API_KEY   = st.secrets["ANTHROPIC_API_KEY"]
+    GOOGLE_SHEET_ID     = st.secrets["GOOGLE_SHEET_ID"]
+    GITHUB_TOKEN        = st.secrets.get("GITHUB_TOKEN", "")
+    GOOGLE_MAPS_API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
 except Exception:
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-    GOOGLE_SHEET_ID   = os.getenv("GOOGLE_SHEET_ID", "")
-    GITHUB_TOKEN      = os.getenv("GITHUB_TOKEN", "")
+    ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "")
+    GOOGLE_SHEET_ID     = os.getenv("GOOGLE_SHEET_ID", "")
+    GITHUB_TOKEN        = os.getenv("GITHUB_TOKEN", "")
+    GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
 GITHUB_REPO  = "yonatan-avshalomov/-whatsapp-bot"
 NOTES_FILE   = "store_notes.csv"
@@ -374,6 +376,111 @@ def save_visit_to_github(date, store, city, status, notes=""):
         return r.status_code in [200, 201]
     except:
         return False
+
+
+# ── Rule A: בדיקת כפילויות (fuzzy matching) ──────────────
+def find_duplicate_stores(name: str, city: str, address: str,
+                           existing: list[dict],
+                           name_thresh: int = 85,
+                           addr_thresh: int = 80) -> list[dict]:
+    """
+    מחזיר רשימת חנויות קיימות שעלולות להיות כפילות של החנות החדשה.
+    משתמש ב-difflib לדמיון שמות וכתובות.
+
+    Parameters
+    ----------
+    name_thresh : int  סף דמיון שמות (0-100), ברירת מחדל 85
+    addr_thresh : int  סף דמיון כתובות (0-100), ברירת מחדל 80
+    """
+    from difflib import SequenceMatcher
+
+    def sim(a: str, b: str) -> int:
+        """אחוז דמיון בין שתי מחרוזות."""
+        if not a or not b:
+            return 0
+        return int(SequenceMatcher(None, a.strip(), b.strip()).ratio() * 100)
+
+    suspects = []
+    name_norm    = name.strip()
+    city_norm    = city.strip()
+    address_norm = address.strip()
+
+    for s in existing:
+        s_name = s.get("name", "").strip()
+        s_city = s.get("city", "").strip()
+        s_addr = s.get("address", "").strip()
+
+        name_score = sim(name_norm, s_name)
+        addr_score = sim(address_norm, s_addr)
+
+        # כפילות חזקה: שם דומה + אותה עיר
+        if name_score >= name_thresh and s_city == city_norm:
+            suspects.append({**s, "_match_reason": f"שם דומה {name_score}%", "_score": name_score})
+            continue
+
+        # כפילות חזקה: כתובת זהה + אותה עיר
+        if addr_score >= addr_thresh and s_city == city_norm and address_norm:
+            suspects.append({**s, "_match_reason": f"כתובת דומה {addr_score}%", "_score": addr_score})
+
+    return suspects
+
+
+# ── Rule B: שמירת חנות חדשה ל-GitHub עם Auto-Geocode ─────
+def save_store_to_github(name: str, city: str, address: str,
+                          chain: str, phone: str) -> tuple[bool, dict | None]:
+    """
+    שומר חנות חדשה ל-stores.csv ב-GitHub.
+    מגאוקד אוטומטית לפי Google Maps לפני השמירה.
+
+    Returns
+    -------
+    (success: bool, geocode_result: dict | None)
+    """
+    import base64
+    from geocoder import geocode as geo_geocode
+
+    if not GITHUB_TOKEN:
+        return False, None
+
+    # ── Rule B: Geocode אוטומטי ──
+    geo = None
+    if address:
+        # הגדר GOOGLE_MAPS_API_KEY כ-env var כדי שהמודול יראה אותו
+        os.environ["GOOGLE_MAPS_API_KEY"] = GOOGLE_MAPS_API_KEY
+        geo = geo_geocode(address, city)
+
+    lat = str(geo["lat"])   if geo else ""
+    lon = str(geo["lon"])   if geo else ""
+
+    # ── קרא CSV קיים מ-GitHub ──
+    api     = f"https://api.github.com/repos/{GITHUB_REPO}/contents/stores.csv"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}",
+               "Accept": "application/vnd.github.v3+json"}
+
+    try:
+        r    = requests.get(api, headers=headers)
+        data = r.json()
+        sha  = data.get("sha", "")
+        current_csv = base64.b64decode(data["content"]).decode("utf-8-sig") if "content" in data else ""
+    except Exception:
+        return False, None
+
+    # ── הוסף שורה חדשה ──
+    new_row = f'{name},{city},{address},{chain},{phone},{lat},{lon}\n'
+    updated = current_csv.rstrip() + "\n" + new_row
+
+    payload = {
+        "message": f"הוספת חנות: {name}",
+        "content": base64.b64encode(updated.encode("utf-8")).decode(),
+        "sha": sha,
+    }
+
+    try:
+        r = requests.put(api, headers=headers, json=payload)
+        success = r.status_code in [200, 201]
+        return success, geo
+    except Exception:
+        return False, None
 
 
 # ── ניקוי שמות סניפים מסנזי ──────────────────────────────
@@ -915,7 +1022,7 @@ def ask_claude(user_msg, context_text, chat_history):
 
 st.title("🏪 ניהול חנויות")
 
-tab1, tab2, tab3, tab4 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה", "➕ חנות חדשה"])
 
 
 # ════════════════════════════
@@ -1350,3 +1457,94 @@ with tab4:
         f"⚫ פרטי: {sum(1 for s in map_stores if not s.get('chain',''))} | "
         f"סה\"כ {len(map_stores)} חנויות"
     )
+
+
+# ════════════════════════════════════════════
+# לשונית 5 — הוספת חנות חדשה (Rule A + Rule B)
+# ════════════════════════════════════════════
+with tab5:
+    st.subheader("➕ הוסף חנות חדשה")
+
+    if not GITHUB_TOKEN:
+        st.error("❌ GITHUB_TOKEN לא מוגדר — לא ניתן לשמור.")
+        st.stop()
+
+    if not GOOGLE_MAPS_API_KEY:
+        st.warning("⚠️ GOOGLE_MAPS_API_KEY לא מוגדר — הגיאוקודינג יתבצע דרך OpenStreetMap (פחות מדויק).")
+
+    # ── טופס ──────────────────────────────────────────────
+    with st.form("add_store_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_name  = st.text_input("שם החנות *", placeholder="שילב פתח תקווה קניון")
+            new_city  = st.text_input("עיר *", placeholder="פתח תקווה")
+            new_chain = st.selectbox("רשת", ["שילב", "מכבי פארם", "ניצת הדובדבן", "פרטי", ""])
+        with col2:
+            new_addr  = st.text_input("כתובת", placeholder="שד' הנשיא 30")
+            new_phone = st.text_input("טלפון", placeholder="03-1234567")
+
+        st.caption("🗺️ הגיאוקודינג מתבצע אוטומטית לפי הכתובת והעיר שהזנת.")
+        submitted = st.form_submit_button("🔍 בדוק ושמור", use_container_width=True)
+
+    # ── לוגיקה אחרי הגשה ──────────────────────────────────
+    if submitted:
+        # ── וולידציה בסיסית ──
+        if not new_name.strip() or not new_city.strip():
+            st.error("⚠️ שם חנות ועיר הם שדות חובה.")
+        else:
+            existing_stores = get_stores()
+
+            # ── Rule A: בדיקת כפילויות ──────────────────────
+            duplicates = find_duplicate_stores(
+                new_name, new_city, new_addr, existing_stores
+            )
+
+            if duplicates:
+                st.warning(f"⚠️ נמצאו {len(duplicates)} חנות/ות דומות — בדוק לפני שמירה!")
+                for dup in duplicates[:5]:
+                    st.markdown(
+                        f"🔁 **{dup['name']}** | {dup.get('city','')} | "
+                        f"{dup.get('address','')}  \n"
+                        f"_סיבה: {dup.get('_match_reason','')} _",
+                        unsafe_allow_html=False
+                    )
+
+                # ── אפשר המשך גם כשיש כפילות חשודה ──
+                st.divider()
+                if st.button("💾 שמור בכל זאת (אני בטוח שזו חנות חדשה)",
+                             key="force_save"):
+                    with st.spinner("מגאוקד ושומר..."):
+                        ok, geo = save_store_to_github(
+                            new_name, new_city, new_addr, new_chain, new_phone
+                        )
+                    if ok:
+                        get_stores.clear()
+                        _show_save_success(new_name, new_city, geo)
+                    else:
+                        st.error("❌ שמירה נכשלה — בדוק GITHUB_TOKEN.")
+
+            else:
+                # ── אין כפילות — שמור ישירות ──
+                with st.spinner("מגאוקד ושומר..."):
+                    ok, geo = save_store_to_github(
+                        new_name, new_city, new_addr, new_chain, new_phone
+                    )
+                if ok:
+                    get_stores.clear()
+                    _show_save_success(new_name, new_city, geo)
+                else:
+                    st.error("❌ שמירה נכשלה — בדוק GITHUB_TOKEN.")
+
+
+def _show_save_success(name: str, city: str, geo: dict | None):
+    """מציג הודעת הצלחה עם פרטי גיאוקודינג."""
+    st.success(f"✅ חנות **{name}** נשמרה בהצלחה!")
+    if geo:
+        src_icon = "🗺️ Google Maps" if geo.get("source") == "google" else "🌍 OpenStreetMap"
+        st.info(
+            f"{src_icon}  \n"
+            f"📍 {geo.get('formatted_address', '')}  \n"
+            f"🎯 `{geo['lat']}, {geo['lon']}`"
+        )
+    else:
+        st.warning("⚠️ לא הצלחנו לגאוקד — הכתובת נשמרה ללא GPS. תוכל לעדכן אחר כך.")
