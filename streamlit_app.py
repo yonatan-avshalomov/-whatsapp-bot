@@ -1048,7 +1048,7 @@ def ask_claude(user_msg, context_text, chat_history):
 
 st.title("🏪 ניהול חנויות")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה", "➕ חנות חדשה", "📅 מעקב ביקורים", "🧭 מסלול יומי"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה", "➕ חנות חדשה", "📅 מעקב ביקורים", "🧭 מסלול יומי", "📍 תקן מיקום"])
 
 
 # ════════════════════════════
@@ -1979,3 +1979,131 @@ with tab7:
                     st.toast("✅ הקישור מוכן — העתק מהתיבה למעלה")
         else:
             st.text_area("קישור Google Maps", gmaps_url, height=100, key="route_url_display2")
+
+
+# ════════════════════════════════════════════
+# לשונית 8 — תקן מיקום (Rule A)
+# ════════════════════════════════════════════
+with tab8:
+    st.subheader("📍 תיקון מיקום חנות")
+    st.caption("לחץ על חנות → לחץ על המפה במיקום הנכון → שמור")
+
+    try:
+        from streamlit_folium import st_folium
+        import folium
+
+        fix_stores = get_stores()
+
+        # ── חיפוש חנות ───────────────────────────────
+        col_s1, col_s2 = st.columns([3, 1])
+        with col_s1:
+            fix_search = st.text_input("חפש חנות", placeholder="שם חנות או עיר...", key="fix_search")
+        with col_s2:
+            fix_chain = st.selectbox("רשת", ["הכל", "שילב", "מכבי פארם", "ניצת הדובדבן", "פרטי"], key="fix_chain")
+
+        # סינון
+        filtered_fix = fix_stores
+        if fix_search:
+            q = fix_search.strip().lower()
+            filtered_fix = [s for s in filtered_fix
+                            if q in s.get("name","").lower() or q in s.get("city","").lower()]
+        if fix_chain != "הכל":
+            filtered_fix = [s for s in filtered_fix if fix_chain in s.get("chain","")]
+
+        if not filtered_fix:
+            st.warning("לא נמצאו חנויות")
+        else:
+            # ── בחירת חנות ───────────────────────────────
+            store_labels = [f"{s['name']} | {s.get('city','')}" for s in filtered_fix]
+            chosen_label = st.selectbox("בחר חנות לתיקון", store_labels, key="fix_store_sel")
+            chosen = filtered_fix[store_labels.index(chosen_label)]
+
+            cur_lat = float(chosen.get("lat") or 32.08)
+            cur_lon = float(chosen.get("lon") or 34.78)
+
+            st.info(f"**{chosen['name']}** | {chosen.get('city','')} | {chosen.get('address','')}\n\n"
+                    f"מיקום נוכחי: `{cur_lat}, {cur_lon}`")
+
+            # ── מפה אינטראקטיבית ──────────────────────────
+            st.markdown("**לחץ על המפה במיקום הנכון של החנות:**")
+
+            m = folium.Map(location=[cur_lat, cur_lon], zoom_start=16)
+
+            # סמן נוכחי (אדום)
+            folium.Marker(
+                [cur_lat, cur_lon],
+                popup=f"מיקום נוכחי: {chosen['name']}",
+                icon=folium.Icon(color="red", icon="home")
+            ).add_to(m)
+
+            # הוסף מעגל כדי שיהיה ברור איפה המיקום
+            folium.Circle(
+                [cur_lat, cur_lon],
+                radius=50,
+                color="red",
+                fill=True,
+                fill_opacity=0.2
+            ).add_to(m)
+
+            map_data = st_folium(m, width=700, height=450, key="fix_map")
+
+            # ── עיבוד לחיצה ──────────────────────────────
+            new_lat = new_lon = None
+            if map_data and map_data.get("last_clicked"):
+                new_lat = round(map_data["last_clicked"]["lat"], 6)
+                new_lon = round(map_data["last_clicked"]["lng"], 6)
+
+                st.success(f"📍 נבחר מיקום: **{new_lat}, {new_lon}**")
+
+                if st.button("💾 שמור מיקום חדש", key="fix_save", type="primary", use_container_width=True):
+                    # עדכן GitHub
+                    import base64
+                    api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/stores.csv"
+                    gh_headers = {"Authorization": f"token {GITHUB_TOKEN}",
+                                  "Accept": "application/vnd.github.v3+json"}
+                    r = requests.get(api, headers=gh_headers)
+                    data = r.json()
+                    sha  = data.get("sha", "")
+                    content_b64 = data.get("content", "")
+                    csv_text = base64.b64decode(content_b64).decode("utf-8-sig")
+
+                    reader = csv.DictReader(io.StringIO(csv_text))
+                    rows   = list(reader)
+                    fields = reader.fieldnames or list(rows[0].keys())
+
+                    updated = False
+                    for row in rows:
+                        if row["name"] == chosen["name"] and row["city"] == chosen.get("city",""):
+                            row["lat"] = str(new_lat)
+                            row["lon"] = str(new_lon)
+                            updated = True
+                            break
+
+                    if updated:
+                        out = io.StringIO()
+                        w = csv.DictWriter(out, fieldnames=fields)
+                        w.writeheader()
+                        w.writerows(rows)
+                        new_content = base64.b64encode(
+                            out.getvalue().encode("utf-8-sig")
+                        ).decode()
+
+                        payload = {
+                            "message": f"Fix location: {chosen['name']} -> {new_lat},{new_lon}",
+                            "content": new_content,
+                            "sha": sha,
+                        }
+                        res = requests.put(api, headers=gh_headers, json=payload)
+                        if res.status_code in (200, 201):
+                            st.success(f"✅ מיקום עודכן! {chosen['name']} → {new_lat}, {new_lon}")
+                            get_stores.clear()
+                            st.balloons()
+                        else:
+                            st.error(f"❌ שגיאה: {res.status_code}")
+                    else:
+                        st.error("לא נמצאה החנות ב-CSV")
+            else:
+                st.caption("⬆️ לחץ על המפה כדי לבחור מיקום")
+
+    except Exception as e:
+        st.error(f"שגיאה בטעינת מפת תיקון מיקום: {e}")

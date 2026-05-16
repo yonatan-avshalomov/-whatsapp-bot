@@ -4,3 +4,10 @@ python-dotenv
 playwright
 beautifulsoup4
 anthropic
+streamlit-folium
+folium
+supabase
+googlemaps
+difflib
+qrcode[pil]
+openpyxl
