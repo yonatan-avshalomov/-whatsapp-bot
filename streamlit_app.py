@@ -8,6 +8,7 @@ import re
 import math
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+from visit_tracker import get_all_visit_stats, urgency_label, urgency_color_hex, get_overdue_stores, get_never_visited
 
 # שעון ישראל — Render רץ על UTC
 ISRAEL_TZ = timezone(timedelta(hours=3))
@@ -1022,7 +1023,7 @@ def ask_claude(user_msg, context_text, chat_history):
 
 st.title("🏪 ניהול חנויות")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה", "➕ חנות חדשה"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה", "➕ חנות חדשה", "📅 מעקב ביקורים"])
 
 
 # ════════════════════════════
@@ -1548,3 +1549,153 @@ def _show_save_success(name: str, city: str, geo: dict | None):
         )
     else:
         st.warning("⚠️ לא הצלחנו לגאוקד — הכתובת נשמרה ללא GPS. תוכל לעדכן אחר כך.")
+
+
+# ════════════════════════════════════════════════════
+# לשונית 6 — מעקב ביקורים (Rule D)
+# ════════════════════════════════════════════════════
+with tab6:
+    st.subheader("📅 מעקב ביקורים — 3 חודשים אחרונים")
+
+    with st.spinner("מחשב היסטוריית ביקורים..."):
+        v_stores    = get_stores()
+        v_deliveries = get_deliveries()
+        v_manual    = get_manual_visits()
+        visit_stats = get_all_visit_stats(v_stores, v_deliveries, v_manual)
+
+    # ── נתונים כלליים ──────────────────────────────
+    total       = len(v_stores)
+    visited_cnt = sum(1 for d in visit_stats.values() if d["days_since"] is not None)
+    never_cnt   = total - visited_cnt
+    overdue     = get_overdue_stores(visit_stats, v_stores, threshold_days=45)
+    warning     = get_overdue_stores(visit_stats, v_stores, threshold_days=21)
+    warning     = [s for s in warning if s["days_since"] < 45]
+
+    # ── כרטיסי סיכום ────────────────────────────────
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("סה\"כ חנויות", total)
+    col2.metric("✅ בוקרו", visited_cnt)
+    col3.metric("🔴 דחוף (45+ יום)", len(overdue))
+    col4.metric("⚫ לא בוקרו מעולם", never_cnt)
+
+    st.divider()
+
+    # ── פילטר תצוגה ─────────────────────────────────
+    view = st.radio(
+        "הצג:",
+        ["🔴 דחוף (45+ ימים)", "🟡 שים לב (21-44 ימים)", "⚫ לא בוקרו כלל", "✅ כל הביקורים"],
+        horizontal=True
+    )
+
+    # ── בנה טבלה לפי פילטר ──────────────────────────
+    if view == "🔴 דחוף (45+ ימים)":
+        display_stores = overdue
+        empty_msg = "אין חנויות דחופות 🎉"
+    elif view == "🟡 שים לב (21-44 ימים)":
+        display_stores = warning
+        empty_msg = "אין חנויות בהמתנה 👍"
+    elif view == "⚫ לא בוקרו כלל":
+        display_stores = get_never_visited(visit_stats, v_stores)
+        empty_msg = "כל החנויות בוקרו! 🎉"
+    else:  # כל הביקורים
+        display_stores = sorted(
+            [s for s in v_stores if visit_stats.get(s["name"], {}).get("days_since") is not None],
+            key=lambda s: visit_stats[s["name"]]["days_since"]
+        )
+        empty_msg = "אין ביקורים רשומים"
+
+    if not display_stores:
+        st.success(empty_msg)
+    else:
+        st.caption(f"מציג {len(display_stores)} חנויות")
+
+        # ── טבלה ────────────────────────────────────
+        for s in display_stores:
+            name  = s["name"]
+            city  = s.get("city", "")
+            chain = s.get("chain", "")
+            stats = visit_stats.get(name, {})
+            days  = stats.get("days_since") or s.get("days_since")
+            last  = stats.get("last_date_str", "—")
+            count = stats.get("visit_count", 0)
+            label = urgency_label(days)
+
+            with st.expander(f"{label}  |  **{name}**  ({city})", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("ביקור אחרון", last)
+                c2.metric("ימים מאז", days if days is not None else "—")
+                c3.metric("ביקורים ב-3 חודשים", count)
+
+                # היסטוריית ביקורים
+                visits_list = stats.get("visits", [])
+                if visits_list:
+                    st.caption("**היסטוריית ביקורים:**")
+                    for v in visits_list[:8]:
+                        src_icon = "📦" if v["source"] == "delivery" else "✋"
+                        note_str = f" | תעודה #{v['note_id']}" if v.get("note_id") else ""
+                        st.text(f"  {src_icon} {v['date'].strftime('%d/%m/%y')}{note_str}")
+
+                # כפתור רישום ביקור
+                if st.button(f"✅ סמן ביקרתי עכשיו", key=f"visit_{name}"):
+                    today_str = today_il()
+                    ok = save_visit_to_github(today_str, name, city, "ביקור", "")
+                    if ok:
+                        get_manual_visits.clear()
+                        st.success("✅ נרשם!")
+                        st.rerun()
+
+    st.divider()
+
+    # ── העלאת תעודות משלוח ──────────────────────────
+    st.subheader("📤 העלאת תעודות משלוח")
+    st.caption("העלה קובץ CSV עם עמודות: id, date, branch (כמו senzey_data.csv)")
+
+    uploaded = st.file_uploader("בחר קובץ CSV", type=["csv"], key="upload_deliveries")
+    if uploaded:
+        try:
+            content   = uploaded.read().decode("utf-8-sig")
+            new_rows  = list(csv.DictReader(io.StringIO(content)))
+            st.success(f"✅ נטענו {len(new_rows)} תעודות. מאמת...")
+
+            # בדוק עמודות
+            required = {"id", "date", "branch"}
+            cols = set(new_rows[0].keys()) if new_rows else set()
+            if not required.issubset(cols):
+                st.error(f"❌ חסרות עמודות: {required - cols}")
+            else:
+                # הצג תצוגה מקדימה
+                st.dataframe(
+                    [{"תאריך": r["date"], "סניף": r["branch"], "מזהה": r["id"]}
+                     for r in new_rows[:10]],
+                    use_container_width=True
+                )
+                if st.button("💾 הוסף לתעודות הקיימות ב-GitHub", key="save_deliveries"):
+                    import base64
+                    api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/senzey_data.csv"
+                    gh_headers = {"Authorization": f"token {GITHUB_TOKEN}",
+                                  "Accept": "application/vnd.github.v3+json"}
+                    r = requests.get(api, headers=gh_headers)
+                    data = r.json()
+                    sha  = data.get("sha", "")
+                    existing_csv = base64.b64decode(data["content"]).decode("utf-8-sig") if "content" in data else ""
+
+                    # הוסף שורות חדשות
+                    new_lines = "\n".join(
+                        f"{row.get('id','')},{row.get('date','')},{row.get('customer','')},{row.get('branch','')}"
+                        for row in new_rows
+                    )
+                    updated = existing_csv.rstrip() + "\n" + new_lines + "\n"
+                    payload = {
+                        "message": f"הוספת {len(new_rows)} תעודות משלוח",
+                        "content": base64.b64encode(updated.encode("utf-8")).decode(),
+                        "sha": sha
+                    }
+                    resp = requests.put(api, headers=gh_headers, json=payload)
+                    if resp.status_code in [200, 201]:
+                        get_deliveries.clear()
+                        st.success(f"✅ {len(new_rows)} תעודות נוספו!")
+                        st.rerun()
+                    else:
+                        st.error("❌ שגיאה בשמירה לגיטהאב.")
+        except Exception as e:
+            st.error(f"❌ שגיאה בקריאת הקובץ: {e}")

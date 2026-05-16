@@ -1,14 +1,31 @@
-"""יצוא חנויות לאקסל — מצפון לדרום, בתוך כל עיר סדר נסיעה נוח"""
-import csv, sys, math
+"""יצוא חנויות לאקסל — מצפון לדרום, בתוך כל עיר סדר נסיעה נוח + היסטוריית ביקורים"""
+import csv, sys, math, io, requests
 from openpyxl import Workbook
 from openpyxl.styles import (PatternFill, Font, Alignment, Border, Side,
                               GradientFill)
 from openpyxl.utils import get_column_letter
+from visit_tracker import get_all_visit_stats, urgency_color_hex
 sys.stdout.reconfigure(encoding="utf-8")
 
-# ── טען נתונים ────────────────────────────────────────────────────────────────
-with open("stores.csv", encoding="utf-8-sig") as f:
-    stores = list(csv.DictReader(f))
+# ── טען נתונים מ-GitHub ────────────────────────────────────────────────────────
+BASE = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main"
+
+def fetch_csv(url):
+    r = requests.get(url, timeout=15)
+    return list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
+
+try:
+    stores     = fetch_csv(f"{BASE}/stores.csv")
+    deliveries = fetch_csv(f"{BASE}/senzey_data.csv")
+    manual_v   = fetch_csv(f"{BASE}/manual_visits.csv")
+    visit_stats = get_all_visit_stats(stores, deliveries, manual_v)
+    print(f"✅ היסטוריית ביקורים: {sum(1 for d in visit_stats.values() if d['days_since'] is not None)} חנויות בוקרו")
+except Exception as e:
+    print(f"⚠️  לא ניתן לטעון היסטוריית ביקורים: {e}")
+    # fallback — טען מקובץ מקומי
+    with open("stores.csv", encoding="utf-8-sig") as f:
+        stores = list(csv.DictReader(f))
+    visit_stats = {}
 
 def safe_float(v, default=0.0):
     try:
@@ -89,8 +106,8 @@ ws.title = "חנויות מצפון לדרום"
 ws.sheet_view.rightToLeft = True
 
 # כותרות
-HEADERS = ["#", "עיר", "שם חנות", "רשת", "כתובת", "טלפון", "Lat", "Lon", "ק\"מ מהוד השרון"]
-col_widths = [5, 16, 36, 10, 28, 14, 9, 9, 12]
+HEADERS = ["#", "עיר", "שם חנות", "רשת", "כתובת", "טלפון", "ביקור אחרון", "ימים", "ק\"מ מהוד השרון"]
+col_widths = [5, 16, 36, 10, 28, 14, 13, 7, 12]
 
 HOME_LAT, HOME_LON = 32.150, 34.893  # הוד השרון
 
@@ -135,9 +152,21 @@ for city in cities_sorted:
 
     for i, s in enumerate(route, 1):
         store_counter += 1
+        name  = s.get("name", "")
         chain = s.get("chain", "")
         colors = chain_colors(chain)
-        fill_color = colors["row_even"] if i % 2 == 0 else colors["row_odd"]
+
+        # ── נתוני ביקור ──
+        vstats      = visit_stats.get(name, {})
+        days_since  = vstats.get("days_since")
+        last_date   = vstats.get("last_date_str", "—")
+
+        # ── צבע שורה: מבוסס על דחיפות אם יש, אחרת לפי רשת ──
+        if days_since is not None:
+            visit_hex  = urgency_color_hex(days_since)
+            fill_color = visit_hex
+        else:
+            fill_color = colors["row_even"] if i % 2 == 0 else colors["row_odd"]
 
         dist = haversine(HOME_LAT, HOME_LON,
                          safe_float(s.get("lat"), HOME_LAT),
@@ -146,12 +175,12 @@ for city in cities_sorted:
         vals = [
             store_counter,
             city,
-            s.get("name", ""),
+            name,
             chain,
             s.get("address", ""),
             s.get("phone", ""),
-            s.get("lat", ""),
-            s.get("lon", ""),
+            last_date,
+            days_since if days_since is not None else "—",
             f"{dist:.1f}",
         ]
         aligns = ["center","right","right","center","right","center","center","center","center"]
