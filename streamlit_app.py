@@ -253,7 +253,7 @@ def normalize_store_name(name):
     return re.sub(r"\s{2,}", " ", name).strip()
 
 # ── טעינת נתונים ─────────────────────────────────────────
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=3600)
 def get_stores():
     """
     קורא חנויות מ-stores.csv (מסקריפר האתרים) — מקיף יותר.
@@ -310,7 +310,7 @@ def get_stores():
     return stores
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=900)
 def get_deliveries():
     try:
         url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/senzey_data.csv"
@@ -321,7 +321,7 @@ def get_deliveries():
         return []
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=300)
 def get_notes():
     """קורא הערות מ-Supabase (מהיר) עם fallback ל-GitHub."""
     try:
@@ -339,7 +339,7 @@ def get_notes():
         return []
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=300)
 def get_manual_visits():
     """קורא ביקורים מ-Supabase (מהיר) עם fallback ל-GitHub."""
     try:
@@ -367,15 +367,23 @@ def get_aliases() -> dict:
 
 
 @st.cache_data(ttl=300)
-def get_visit_stats_cached(stores: list, deliveries: list,
-                            manual: list, aliases: dict) -> dict:
-    """מחשב סטטיסטיקות ביקורים עם cache — מוקפא 5 דקות."""
+def get_visit_stats_cached() -> dict:
+    """מחשב סטטיסטיקות ביקורים עם cache — מוקפא 5 דקות.
+    לא מקבל ארגומנטים כדי למנוע hashing יקר של רשימות גדולות."""
+    stores     = get_stores()
+    deliveries = get_deliveries()
+    manual     = get_manual_visits()
+    aliases    = get_aliases()
     return get_all_visit_stats(stores, deliveries, manual, aliases=aliases)
 
 
 @st.cache_data(ttl=600)
-def get_unmatched_cached(deliveries: list, stores: list, aliases: dict) -> list:
-    """מחשב תעודות לא מזוהות עם cache — מוקפא 10 דקות."""
+def get_unmatched_cached() -> list:
+    """מחשב תעודות לא מזוהות עם cache — מוקפא 10 דקות.
+    לא מקבל ארגומנטים כדי למנוע hashing יקר של רשימות גדולות."""
+    deliveries = get_deliveries()
+    stores     = get_stores()
+    aliases    = get_aliases()
     return get_unmatched_branches(deliveries, stores, aliases)
 
 
@@ -1091,6 +1099,12 @@ def ask_claude(user_msg, context_text, chat_history):
 
 st.title("🏪 ניהול חנויות")
 
+# ── טעינת נתונים פעם אחת לכל ה-render (מכל-cached, מהיר) ──
+_stores     = get_stores()
+_deliveries = get_deliveries()
+_notes      = get_notes()
+_visits     = get_manual_visits()
+
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "💬 שיחה", "📝 הערה", "📊 היום", "🗺️ מפה",
     "➕ חנות", "📅 ביקורים", "🧭 מסלול", "📍 מיקום"
@@ -1118,10 +1132,10 @@ with tab1:
 
         with st.chat_message("assistant"):
             with st.spinner("מחפש..."):
-                stores     = get_stores()
-                deliveries = get_deliveries()
-                notes      = get_notes()
-                visits     = get_manual_visits()
+                stores     = _stores
+                deliveries = _deliveries
+                notes      = _notes
+                visits     = _visits
 
                 # ── זיהוי ביקור מהשיחה: "ביקרתי ב...", "הייתי ב..." ──
                 visited_stores = detect_visit_in_msg(prompt, stores)
@@ -1184,7 +1198,7 @@ with tab1:
 with tab2:
     st.subheader("📝 הוסף הערה על חנות")
 
-    stores = get_stores()
+    stores = _stores
     store_names = sorted(set(s["name"] for s in stores))
     cities      = sorted(set(s["city"] for s in stores if s["city"]))
 
@@ -1309,7 +1323,7 @@ with tab2:
             st.error("נא לבחור חנות ולכתוב הערה")
 
     st.divider()
-    all_notes = get_notes()
+    all_notes = _notes
     local     = st.session_state.get("local_notes", [])
     all_combined = all_notes + local
 
@@ -1380,9 +1394,9 @@ with tab3:
     st.subheader("📊 סיכום היום")
 
     today_str  = today_il()
-    deliveries = get_deliveries()
-    visits     = get_manual_visits()
-    notes      = get_notes()
+    deliveries = _deliveries
+    visits     = _visits
+    notes      = _notes
 
     today_del = [d for d in deliveries if d.get("date","").startswith(today_str)]
     today_vis = [v for v in visits    if v.get("date","") == today_str or v.get("date","").startswith(today_str)]
@@ -1403,8 +1417,7 @@ with tab3:
 
     if today_vis:
         st.subheader("👣 ביקורים")
-        stores_tab3 = get_stores()
-        stores_map  = {s["name"]: s for s in stores_tab3}
+        stores_map  = {s["name"]: s for s in _stores}
         for v in today_vis:
             icon       = "✅" if v.get("status") == "ביקור" else "⚠️"
             v_store    = v.get('store', '')
@@ -1431,9 +1444,13 @@ with tab3:
 # ════════════════════════════
 # לשונית 4 — מפה
 # ════════════════════════════
-@st.cache_data(ttl=180)
-def build_store_map_html(stores_list, deliveries_list, visits_list) -> str:
-    """מייצר HTML של מפת Leaflet עם כל החנויות + סטטוס ביקור."""
+@st.cache_data(ttl=300)
+def build_store_map_html() -> str:
+    """מייצר HTML של מפת Leaflet עם כל החנויות + סטטוס ביקור.
+    לא מקבל ארגומנטים כדי למנוע hashing יקר של רשימות גדולות."""
+    stores_list     = get_stores()
+    deliveries_list = get_deliveries()
+    visits_list     = get_manual_visits()
 
     # ── חשב תאריך אחרון לכל סניף מסנזי ──────────────────────
     branch_last: dict = {}
@@ -1646,10 +1663,8 @@ with tab4:
             st.rerun()
 
     with st.spinner("טוען מפה..."):
-        map_stores     = get_stores()
-        map_deliveries = get_deliveries()
-        map_visits     = get_manual_visits()
-        map_html = build_store_map_html(map_stores, map_deliveries, map_visits)
+        map_html = build_store_map_html()
+        map_stores = _stores
 
     st.components.v1.html(map_html, height=580, scrolling=False)
 
@@ -1694,7 +1709,7 @@ with tab4:
 
     with col_kml2:
         try:
-            _kml_vstats = get_all_visit_stats(map_stores, map_deliveries, map_visits)
+            _kml_vstats = get_visit_stats_cached()
             _kml_bytes  = build_kml(map_stores, _kml_vstats)
             _kml_name   = build_kml_filename()
             st.download_button(
@@ -1749,7 +1764,7 @@ with tab5:
         if not new_name.strip() or not new_city.strip():
             st.error("⚠️ שם חנות ועיר הם שדות חובה.")
         else:
-            existing_stores = get_stores()
+            existing_stores = _stores
 
             # ── Rule A: בדיקת כפילויות ──────────────────────
             duplicates = find_duplicate_stores(
@@ -1814,12 +1829,10 @@ with tab6:
     st.subheader("📅 מעקב ביקורים — 3 חודשים אחרונים")
 
     with st.spinner("מחשב היסטוריית ביקורים..."):
-        v_stores     = get_stores()
-        v_deliveries = get_deliveries()
-        v_manual     = get_manual_visits()
+        visit_stats  = get_visit_stats_cached()
+        v_stores     = _stores
+        v_deliveries = _deliveries
         v_aliases    = get_aliases()
-        # cache key — מספר שורות כ-proxy לשינוי תוכן
-        visit_stats  = get_visit_stats_cached(v_stores, v_deliveries, v_manual, v_aliases)
 
     # ── נתונים כלליים ──────────────────────────────
     total       = len(v_stores)
@@ -1869,7 +1882,7 @@ with tab6:
         st.caption(f"מציג {len(display_stores)} חנויות")
 
         # ── טבלה ────────────────────────────────────
-        tab6_notes = get_notes() + st.session_state.get("local_notes", [])
+        tab6_notes = _notes + st.session_state.get("local_notes", [])
 
         for s in display_stores:
             name  = s["name"]
@@ -2011,7 +2024,7 @@ with tab6:
     unmatched_branches = []
     if st.session_state.get("show_unmatched"):
         with st.spinner("מחפש תעודות לא מזוהות..."):
-            unmatched_branches = get_unmatched_cached(v_deliveries, v_stores, v_aliases)
+            unmatched_branches = get_unmatched_cached()
 
     if st.session_state.get("show_unmatched") and not unmatched_branches:
         st.success("✅ כל התעודות זוהו! אין רשומות לא מזוהות.")
@@ -2071,7 +2084,7 @@ with tab6:
 with tab7:
     st.subheader("🧭 תכנון מסלול יומי")
 
-    route_stores = get_stores()
+    route_stores = _stores
 
     # ── סינון ראשוני ───────────────────────────────
     col_f1, col_f2 = st.columns(2)
@@ -2190,7 +2203,7 @@ with tab8:
         from streamlit_folium import st_folium
         import folium
 
-        fix_stores = get_stores()
+        fix_stores = _stores
 
         # ── חיפוש חנות ───────────────────────────────
         col_s1, col_s2 = st.columns([3, 1])
