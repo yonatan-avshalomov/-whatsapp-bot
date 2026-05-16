@@ -8,7 +8,6 @@ streamlit-folium
 folium
 supabase
 googlemaps
-difflib
 qrcode[pil]
 openpyxl
 openai
