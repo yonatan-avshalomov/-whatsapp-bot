@@ -9,6 +9,7 @@ import math
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from visit_tracker import get_all_visit_stats, urgency_label, urgency_color_hex, get_overdue_stores, get_never_visited
+from route_planner import optimize_route, build_gmaps_url, build_waze_url, build_qr_code, total_distance, filter_stores
 
 # שעון ישראל — Render רץ על UTC
 ISRAEL_TZ = timezone(timedelta(hours=3))
@@ -1036,7 +1037,7 @@ def ask_claude(user_msg, context_text, chat_history):
 
 st.title("🏪 ניהול חנויות")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה", "➕ חנות חדשה", "📅 מעקב ביקורים"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["💬 שיחה", "📝 הוסף הערה", "📊 סיכום יום", "🗺️ מפה", "➕ חנות חדשה", "📅 מעקב ביקורים", "🧭 מסלול יומי"])
 
 
 # ════════════════════════════
@@ -1800,3 +1801,117 @@ with tab6:
                         st.error("❌ שגיאה בשמירה לגיטהאב.")
         except Exception as e:
             st.error(f"❌ שגיאה בקריאת הקובץ: {e}")
+
+
+# ════════════════════════════════════════════════════
+# לשונית 7 — מסלול יומי (Rule B Action 2)
+# ════════════════════════════════════════════════════
+with tab7:
+    st.subheader("🧭 תכנון מסלול יומי")
+
+    route_stores = get_stores()
+
+    # ── סינון ראשוני ───────────────────────────────
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        all_chains = sorted(set(s.get("chain","") or "פרטי" for s in route_stores))
+        sel_chains = st.multiselect("סנן לפי רשת", all_chains,
+                                     default=[], key="route_chains")
+    with col_f2:
+        all_cities = sorted(set(s.get("city","") for s in route_stores if s.get("city")))
+        sel_cities = st.multiselect("סנן לפי עיר", all_cities,
+                                     default=[], key="route_cities")
+
+    # החל סינון
+    filtered = filter_stores(
+        route_stores,
+        cities=sel_cities  if sel_cities  else None,
+        chains=sel_chains  if sel_chains  else None
+    )
+
+    # ── בחירת חנויות ────────────────────────────────
+    st.caption(f"{len(filtered)} חנויות זמינות לאחר סינון")
+    store_options = [f"{s['name']} ({s.get('city','')})" for s in filtered]
+    store_map     = {f"{s['name']} ({s.get('city','')})": s for s in filtered}
+
+    selected_labels = st.multiselect(
+        "בחר חנויות למסלול",
+        options=store_options,
+        default=[],
+        key="route_selection",
+        help="בחר 2-23 חנויות (מגבלת Google Maps)"
+    )
+    selected_stops = [store_map[lbl] for lbl in selected_labels if lbl in store_map]
+
+    # ── נקודת התחלה ─────────────────────────────────
+    st.divider()
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
+        start_name = st.text_input("נקודת התחלה", value="הוד השרון", key="route_start")
+    with col_s2:
+        start_lat  = st.number_input("Lat", value=32.150, format="%.4f", key="route_lat")
+    with col_s3:
+        start_lon  = st.number_input("Lon", value=34.893, format="%.4f", key="route_lon")
+
+    travel_mode = st.radio("אמצעי תחבורה", ["🚗 נהיגה", "🚶 הליכה"], horizontal=True)
+    mode_str = "driving" if "נהיגה" in travel_mode else "walking"
+
+    # ── חשב מסלול ───────────────────────────────────
+    if len(selected_stops) < 2:
+        st.info("בחר לפחות 2 חנויות כדי לחשב מסלול.")
+    else:
+        if len(selected_stops) > 23:
+            st.warning("⚠️ Google Maps תומך במקסימום 23 ציונים. נבחרו 23 הראשונות.")
+            selected_stops = selected_stops[:23]
+
+        with st.spinner("מחשב מסלול אופטימלי..."):
+            route = optimize_route(selected_stops, start_lat, start_lon)
+            total_km = total_distance(route)
+            gmaps_url = build_gmaps_url(route, start_lat, start_lon, mode_str)
+            waze_url  = build_waze_url(route)
+
+        # ── סיכום מסלול ─────────────────────────────
+        st.success(f"✅ מסלול מיטבי — {len(route)} עצירות | סה\"כ ~{total_km:.0f} ק\"מ")
+
+        # טבלת עצירות
+        st.subheader("📋 סדר הביקורים")
+        for i, s in enumerate(route, 1):
+            chain = s.get("chain","")
+            chain_icon = "🔵" if "שילב" in chain else "🟢" if "מכבי" in chain else "🟠" if "ניצת" in chain else "⚫"
+            col_a, col_b, col_c = st.columns([1, 5, 2])
+            col_a.markdown(f"**{i}**")
+            col_b.markdown(f"{chain_icon} **{s['name']}** — {s.get('city','')}")
+            col_c.markdown(f"📏 {s.get('leg_km',0)} ק\"מ")
+
+        st.divider()
+
+        # ── כפתורי ניווט ────────────────────────────
+        st.subheader("📱 פתח לניווט")
+        col_g, col_w = st.columns(2)
+        with col_g:
+            st.link_button("🗺️ פתח ב-Google Maps",
+                            gmaps_url,
+                            use_container_width=True,
+                            type="primary")
+        with col_w:
+            if waze_url:
+                st.link_button("🔵 נווט ב-Waze (עצירה ראשונה)",
+                                waze_url,
+                                use_container_width=True)
+
+        # ── QR Code לסריקה מהנייד ───────────────────
+        st.divider()
+        st.subheader("📲 סרוק מהטלפון")
+        st.caption("סרוק את ה-QR Code כדי לפתוח את המסלול ישירות בנייד שלך")
+
+        qr_buf = build_qr_code(gmaps_url)
+        if qr_buf:
+            col_qr, col_url = st.columns([1, 2])
+            with col_qr:
+                st.image(qr_buf, width=200)
+            with col_url:
+                st.text_area("קישור Google Maps", gmaps_url, height=120, key="route_url_display")
+                if st.button("📋 העתק קישור", key="copy_url"):
+                    st.toast("✅ הקישור מוכן — העתק מהתיבה למעלה")
+        else:
+            st.text_area("קישור Google Maps", gmaps_url, height=100, key="route_url_display2")
