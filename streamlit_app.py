@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from visit_tracker import get_all_visit_stats, urgency_label, urgency_color_hex, get_overdue_stores, get_never_visited
 from route_planner import optimize_route, build_gmaps_url, build_waze_url, build_qr_code, total_distance, filter_stores
+from database import db as supabase_db
 
 # שעון ישראל — Render רץ על UTC
 ISRAEL_TZ = timezone(timedelta(hours=3))
@@ -26,15 +27,24 @@ load_dotenv()
 
 # ── מפתחות ───────────────────────────────────────────────
 try:
-    ANTHROPIC_API_KEY   = st.secrets["ANTHROPIC_API_KEY"]
-    GOOGLE_SHEET_ID     = st.secrets["GOOGLE_SHEET_ID"]
-    GITHUB_TOKEN        = st.secrets.get("GITHUB_TOKEN", "")
-    GOOGLE_MAPS_API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+    ANTHROPIC_API_KEY    = st.secrets["ANTHROPIC_API_KEY"]
+    GOOGLE_SHEET_ID      = st.secrets["GOOGLE_SHEET_ID"]
+    GITHUB_TOKEN         = st.secrets.get("GITHUB_TOKEN", "")
+    GOOGLE_MAPS_API_KEY  = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+    SUPABASE_URL         = st.secrets.get("SUPABASE_URL", "")
+    SUPABASE_ANON_KEY    = st.secrets.get("SUPABASE_ANON_KEY", "")
 except Exception:
-    ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "")
-    GOOGLE_SHEET_ID     = os.getenv("GOOGLE_SHEET_ID", "")
-    GITHUB_TOKEN        = os.getenv("GITHUB_TOKEN", "")
-    GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
+    GOOGLE_SHEET_ID      = os.getenv("GOOGLE_SHEET_ID", "")
+    GITHUB_TOKEN         = os.getenv("GITHUB_TOKEN", "")
+    GOOGLE_MAPS_API_KEY  = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
+    SUPABASE_ANON_KEY    = os.getenv("SUPABASE_ANON_KEY", "")
+
+# העבר credentials ל-Supabase client
+if SUPABASE_URL:
+    os.environ["SUPABASE_URL"]      = SUPABASE_URL
+    os.environ["SUPABASE_ANON_KEY"] = SUPABASE_ANON_KEY
 
 GITHUB_REPO  = "yonatan-avshalomov/-whatsapp-bot"
 NOTES_FILE   = "store_notes.csv"
@@ -293,90 +303,93 @@ def get_deliveries():
         return []
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def get_notes():
+    """קורא הערות מ-Supabase (מהיר) עם fallback ל-GitHub."""
+    try:
+        rows = supabase_db.get_notes(limit=300)
+        if rows:
+            return rows
+    except Exception:
+        pass
+    # GitHub fallback
     try:
         url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/store_notes.csv"
         r = requests.get(url, timeout=10)
-        text = r.content.decode("utf-8-sig")
-        return list(csv.DictReader(io.StringIO(text)))
-    except:
+        return list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
+    except Exception:
         return []
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def get_manual_visits():
+    """קורא ביקורים מ-Supabase (מהיר) עם fallback ל-GitHub."""
+    try:
+        rows = supabase_db.get_visits(limit=500)
+        if rows:
+            return rows
+    except Exception:
+        pass
+    # GitHub fallback
     try:
         url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/manual_visits.csv"
         r = requests.get(url, timeout=10)
-        text = r.content.decode("utf-8-sig")
-        return list(csv.DictReader(io.StringIO(text)))
-    except:
+        return list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
+    except Exception:
         return []
 
 
 def save_note_to_github(date, store, city, note):
-    """שומר הערה חדשה לקובץ store_notes.csv בגיטהאב."""
+    """שומר הערה — Supabase ראשון, GitHub כגיבוי."""
+    # ── Supabase (מהיר) ──
+    ok = supabase_db.add_note(date, store, city, note)
+    if ok:
+        return True
+    # ── GitHub fallback ──
     if not GITHUB_TOKEN:
         return False
     try:
+        import base64
         api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{NOTES_FILE}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-
-        # קבל תוכן נוכחי
         r = requests.get(api, headers=headers)
         data = r.json()
-        current = ""
-        sha = ""
-        if "content" in data:
-            import base64
-            current = base64.b64decode(data["content"]).decode("utf-8-sig")
-            sha = data["sha"]
-
-        # הוסף שורה
+        current = base64.b64decode(data["content"]).decode("utf-8-sig") if "content" in data else ""
+        sha = data.get("sha", "")
         new_line = f'\n{date},{store},{city},"{note}"'
         updated = current.rstrip() + new_line + "\n"
-
-        import base64
-        payload = {
-            "message": f"הערה חדשה: {store}",
-            "content": base64.b64encode(updated.encode("utf-8")).decode(),
-            "sha": sha
-        }
+        payload = {"message": f"הערה: {store}",
+                   "content": base64.b64encode(updated.encode("utf-8")).decode(), "sha": sha}
         r = requests.put(api, headers=headers, json=payload)
         return r.status_code in [200, 201]
-    except:
+    except Exception:
         return False
 
 
 def save_visit_to_github(date, store, city, status, notes=""):
-    """שומר ביקור ידני לקובץ manual_visits.csv בגיטהאב."""
+    """שומר ביקור — Supabase ראשון, GitHub כגיבוי."""
+    # ── Supabase (מהיר) ──
+    ok = supabase_db.add_visit(date, store, city, status, notes)
+    if ok:
+        return True
+    # ── GitHub fallback ──
     if not GITHUB_TOKEN:
         return False
     try:
+        import base64
         api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{VISITS_FILE}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-
         r = requests.get(api, headers=headers)
         data = r.json()
-        current, sha = "", ""
-        if "content" in data:
-            import base64
-            current = base64.b64decode(data["content"]).decode("utf-8-sig")
-            sha = data["sha"]
-
+        current = base64.b64decode(data["content"]).decode("utf-8-sig") if "content" in data else ""
+        sha = data.get("sha", "")
         new_line = f'\n{date},{store},{city},{status},{notes}'
         updated = current.rstrip() + new_line + "\n"
-
-        import base64
-        payload = {
-            "message": f"ביקור: {store}",
-            "content": base64.b64encode(updated.encode("utf-8")).decode(),
-            "sha": sha
-        }
+        payload = {"message": f"ביקור: {store}",
+                   "content": base64.b64encode(updated.encode("utf-8")).decode(), "sha": sha}
         r = requests.put(api, headers=headers, json=payload)
         return r.status_code in [200, 201]
-    except:
+    except Exception:
         return False
 
 
