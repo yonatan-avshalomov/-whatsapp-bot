@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from visit_tracker import get_all_visit_stats, urgency_label, urgency_color_hex, get_overdue_stores, get_never_visited
 from route_planner import optimize_route, build_gmaps_url, build_waze_url, build_qr_code, total_distance, filter_stores
 from database import db as supabase_db
+from kml_exporter import build_kml, build_kml_filename
 
 # שעון ישראל — Render רץ על UTC
 ISRAEL_TZ = timezone(timedelta(hours=3))
@@ -1532,6 +1533,33 @@ with tab4:
         f"⚫ פרטי: {sum(1 for s in map_stores if not s.get('chain',''))} | "
         f"סה\"כ {len(map_stores)} חנויות"
     )
+
+    # ── ייצוא KML ל-Google My Maps ───────────────────────────
+    st.divider()
+    st.markdown("#### 📥 ייצוא ל-Google My Maps")
+    col_kml1, col_kml2 = st.columns([2, 3])
+    with col_kml1:
+        with st.spinner("בונה קובץ KML..."):
+            try:
+                _kml_vstats = get_all_visit_stats(map_stores, map_deliveries, map_visits)
+                _kml_bytes  = build_kml(map_stores, _kml_vstats)
+                _kml_name   = build_kml_filename()
+                st.download_button(
+                    label="📥 הורד KML (Google My Maps)",
+                    data=_kml_bytes,
+                    file_name=_kml_name,
+                    mime="application/vnd.google-earth.kml+xml",
+                    use_container_width=True,
+                )
+            except Exception as _kml_err:
+                st.error(f"שגיאה בבניית KML: {_kml_err}")
+    with col_kml2:
+        st.info(
+            "**איך לייבא ב-Google My Maps:**\n"
+            "1. פתח [maps.google.com/maps/d](https://www.google.com/maps/d/) ← צור מפה חדשה\n"
+            "2. לחץ **ייבא** ← העלה את קובץ ה-KML\n"
+            "3. בחר את עמודת **השם** ← כל הסניפים מופיעים עם צבעים לפי רשת"
+        )
 
 
 # ════════════════════════════════════════════
