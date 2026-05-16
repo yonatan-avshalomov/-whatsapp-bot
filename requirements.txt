@@ -11,3 +11,4 @@ googlemaps
 difflib
 qrcode[pil]
 openpyxl
+openai

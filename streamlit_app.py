@@ -1162,9 +1162,92 @@ with tab2:
     store_names = sorted(set(s["name"] for s in stores))
     cities      = sorted(set(s["city"] for s in stores if s["city"]))
 
+    # ── Rule C: הערה קולית ───────────────────────────────────
+    with st.expander("🎤 הערה קולית — העלה הקלטה", expanded=False):
+        st.caption("הקלט הערה קצרה בטלפון → העלה כאן → תמלול אוטומטי + זיהוי חנות")
+        voice_file = st.file_uploader(
+            "הקלטה קולית",
+            type=["mp3", "m4a", "wav", "ogg", "webm", "mp4"],
+            key="voice_upload",
+            label_visibility="collapsed"
+        )
+        if voice_file is not None:
+            with st.spinner("🎙️ מתמלל הקלטה..."):
+                try:
+                    import openai as _openai_mod
+                    _oa_client = _openai_mod.OpenAI(
+                        api_key=st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+                    )
+                    audio_bytes = voice_file.read()
+                    # Whisper API requires a file-like object with a name
+                    import io as _io
+                    audio_buf = _io.BytesIO(audio_bytes)
+                    audio_buf.name = voice_file.name
+                    transcript_resp = _oa_client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_buf,
+                        language="he"
+                    )
+                    transcript_text = transcript_resp.text.strip()
+                    st.success(f"📝 תמלול: **{transcript_text}**")
+
+                    # ── Claude: חלץ חנות + הערה ──
+                    with st.spinner("🤖 מזהה חנות..."):
+                        import anthropic as _ant
+                        _ant_client = _ant.Anthropic(api_key=ANTHROPIC_API_KEY)
+                        store_list_short = "\n".join(
+                            f"- {s['name']} ({s.get('city','')})"
+                            for s in stores[:200]
+                        )
+                        extract_prompt = f"""אתה עוזר CRM לנציג מכירות בישראל.
+קיבלת תמלול של הערה קולית שהנציג הקליט לאחר ביקור בחנות.
+עליך לחלץ:
+1. שם החנות הכי מתאים מהרשימה הבאה
+2. סוג ההערה: ביקרתי היום / לא הגעתי / צריך הזמנה / הערה כללית
+3. תוכן ההערה (עברית, כמה שיותר קצר וברור)
+
+רשימת חנויות:
+{store_list_short}
+
+תמלול הנציג:
+"{transcript_text}"
+
+ענה רק JSON כזה (ללא markdown):
+{{"store": "שם מדויק מהרשימה", "type": "ביקרתי היום", "note": "תוכן ההערה"}}"""
+                        _resp = _ant_client.messages.create(
+                            model="claude-3-5-haiku-20241022",
+                            max_tokens=200,
+                            messages=[{"role": "user", "content": extract_prompt}]
+                        )
+                        raw_json = _resp.content[0].text.strip()
+                        # נקה markdown אם יש
+                        raw_json = re.sub(r"^```json?\s*", "", raw_json)
+                        raw_json = re.sub(r"\s*```$", "", raw_json)
+                        extracted = json.loads(raw_json)
+
+                    st.info(
+                        f"🏪 חנות: **{extracted.get('store', '—')}**\n\n"
+                        f"📌 סוג: **{extracted.get('type', '—')}**\n\n"
+                        f"💬 הערה: {extracted.get('note', '—')}"
+                    )
+                    if st.button("✅ השתמש בנתונים אלו", key="use_voice_data", type="primary"):
+                        st.session_state["voice_store"] = extracted.get("store", "")
+                        st.session_state["voice_type"]  = extracted.get("type", "הערה כללית")
+                        st.session_state["voice_note"]  = extracted.get("note", transcript_text)
+                        st.rerun()
+
+                except ImportError:
+                    st.error("❌ חבילת openai לא מותקנת — הוסף OPENAI_API_KEY ו-openai לרשימת החבילות")
+                except Exception as _ve:
+                    st.error(f"❌ שגיאה בתמלול: {_ve}")
+
+    # ── טופס הערה ───────────────────────────────────────────
     col1, col2 = st.columns(2)
     with col1:
-        selected_store = st.selectbox("חנות", [""] + store_names, key="note_store")
+        # מלא מנתוני קול אם קיימים
+        _voice_store_default = st.session_state.pop("voice_store", "")
+        _voice_store_idx = store_names.index(_voice_store_default) + 1 if _voice_store_default in store_names else 0
+        selected_store = st.selectbox("חנות", [""] + store_names, index=_voice_store_idx, key="note_store")
     with col2:
         selected_city = st.selectbox("עיר", [""] + cities, key="note_city")
 
@@ -1173,9 +1256,14 @@ with tab2:
         if store_info and store_info.get("address"):
             st.caption(f"📍 {store_info['address']}, {store_info.get('city','')}")
 
-    note_text = st.text_area("הערה", placeholder="לדוגמה: המנהל ביקש עוד מוס, המדף דליל...", key="note_text")
+    _voice_note_default = st.session_state.pop("voice_note", "")
+    note_text = st.text_area("הערה", value=_voice_note_default,
+                              placeholder="לדוגמה: המנהל ביקש עוד מוס, המדף דליל...", key="note_text")
 
-    note_type = st.radio("סוג", ["הערה כללית", "ביקרתי היום", "לא הגעתי", "צריך הזמנה"], horizontal=True)
+    _voice_type_default = st.session_state.pop("voice_type", "הערה כללית")
+    _note_types = ["הערה כללית", "ביקרתי היום", "לא הגעתי", "צריך הזמנה"]
+    _type_idx = _note_types.index(_voice_type_default) if _voice_type_default in _note_types else 0
+    note_type = st.radio("סוג", _note_types, index=_type_idx, horizontal=True)
 
     if st.button("💾 שמור הערה", type="primary"):
         if selected_store and note_text:
