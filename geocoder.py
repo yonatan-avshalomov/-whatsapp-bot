@@ -76,10 +76,63 @@ def haversine(lat1, lon1, lat2, lon2) -> float:
          math.sin(dlon/2)**2)
     return R * 2 * math.asin(math.sqrt(a))
 
-# ── Google Maps ──────────────────────────────────────────────────────────────
+# ── Google Places Text Search ─────────────────────────────────────────────────
+def _geocode_places(name: str, city: str, api_key: str) -> dict | None:
+    """
+    מחפש עסק לפי שם + עיר ב-Google Places Text Search API.
+    מדויק יותר מגיאוקודינג רגיל כי מוצא את העסק עצמו.
+
+    query לדוגמה: "שילב נהריה ביג" → מחזיר את המיקום המדויק של הסניף.
+    """
+    import requests
+
+    query  = f"{name} {city} ישראל".strip()
+    url    = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    params = {
+        "query":    query,
+        "language": "he",
+        "region":   "il",
+        "key":      api_key,
+    }
+
+    try:
+        r    = requests.get(url, params=params, timeout=10)
+        data = r.json()
+    except Exception as e:
+        log.error(f"Places API error for '{query}': {e}")
+        return None
+
+    if data.get("status") not in ("OK", "ZERO_RESULTS"):
+        log.error(f"Places API status {data.get('status')} for '{query}'")
+        return None
+
+    results = data.get("results", [])
+    if not results:
+        log.warning(f"Places: no results for '{query}'")
+        return None
+
+    # ── נסה למצוא תוצאה בתוך ישראל ──
+    for res in results[:3]:
+        loc = res["geometry"]["location"]
+        lat, lon = loc["lat"], loc["lng"]
+        if _in_israel(lat, lon):
+            return {
+                "lat":               round(lat, 6),
+                "lon":               round(lon, 6),
+                "formatted_address": res.get("formatted_address", ""),
+                "place_id":          res.get("place_id", ""),
+                "source":            "places",
+                "geocoded_at":       datetime.now().strftime("%Y-%m-%d"),
+            }
+
+    log.warning(f"Places: all results outside Israel for '{query}'")
+    return None
+
+
+# ── Google Maps Geocoding ─────────────────────────────────────────────────────
 def _geocode_google(address: str, city: str, api_key: str) -> dict | None:
     """
-    קוראת ל-Google Maps Geocoding API.
+    קוראת ל-Google Maps Geocoding API (לפי כתובת).
     מחזירה dict עם lat, lon, formatted_address, place_id
     או None אם נכשל.
     """
@@ -154,7 +207,77 @@ def _geocode_nominatim(address: str, city: str) -> dict | None:
         "geocoded_at":       datetime.now().strftime("%Y-%m-%d"),
     }
 
-# ── פונקציה ראשית ────────────────────────────────────────────────────────────
+# ── פונקציה ראשית (לפי שם עסק — הכי מדויק) ──────────────────────────────────
+def geocode_store(name: str, address: str = "", city: str = "",
+                  force: bool = False) -> dict | None:
+    """
+    מגאוקד חנות לפי שם העסק (Places API) עם fallback לכתובת.
+
+    סדר העדיפויות:
+      1. Cache
+      2. Google Places Text Search (שם + עיר)  ← הכי מדויק
+      3. Google Geocoding (כתובת + עיר)
+      4. Nominatim (OSM) — fallback חינמי
+
+    Parameters
+    ----------
+    name    : str   שם החנות (לדוגמה: "שילב נהריה ביג")
+    address : str   כתובת הרחוב (אופציונלי)
+    city    : str   שם העיר
+    force   : bool  אם True — מתעלם מה-cache
+
+    Returns
+    -------
+    dict עם:  lat, lon, formatted_address, place_id, source, geocoded_at
+    None      אם הגיאוקודינג נכשל לחלוטין
+    """
+    # cache key כולל שם + כתובת + עיר
+    key   = f"store|{name.strip()}|{city.strip()}".lower()
+    cache = _load_cache()
+
+    if not force and key in cache:
+        log.info(f"Cache hit (store): '{name}, {city}'")
+        return cache[key]
+
+    api_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
+    # ── 1. Google Places (לפי שם) ──
+    if api_key and name:
+        time.sleep(RATE_LIMIT)
+        result = _geocode_places(name, city, api_key)
+        if result:
+            cache[key] = result
+            _save_cache(cache)
+            log.info(f"Places OK: '{name}, {city}' → {result['lat']},{result['lon']}")
+            return result
+        log.warning(f"Places failed for '{name}, {city}' — trying Geocoding")
+
+    # ── 2. Google Geocoding (לפי כתובת) ──
+    if api_key and address:
+        time.sleep(RATE_LIMIT)
+        result = _geocode_google(address, city, api_key)
+        if result:
+            cache[key] = result
+            _save_cache(cache)
+            log.info(f"Geocoding OK: '{address}, {city}' → {result['lat']},{result['lon']}")
+            return result
+        log.warning(f"Geocoding failed for '{address}, {city}' — trying Nominatim")
+
+    # ── 3. Nominatim fallback ──
+    query_addr = address or name
+    time.sleep(NOM_RATE)
+    result = _geocode_nominatim(query_addr, city)
+    if result:
+        cache[key] = result
+        _save_cache(cache)
+        log.info(f"Nominatim OK: '{query_addr}, {city}' → {result['lat']},{result['lon']}")
+        return result
+
+    log.error(f"FAILED all geocoders: '{name}, {city}'")
+    return None
+
+
+# ── פונקציה ראשית (לפי כתובת בלבד) ─────────────────────────────────────────
 def geocode(address: str, city: str = "", force: bool = False) -> dict | None:
     """
     מחזיר קואורדינטות מדויקות לכתובת נתונה.

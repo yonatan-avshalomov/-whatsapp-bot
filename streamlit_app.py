@@ -453,17 +453,14 @@ def save_store_to_github(name: str, city: str, address: str,
     (success: bool, geocode_result: dict | None)
     """
     import base64
-    from geocoder import geocode as geo_geocode
+    from geocoder import geocode_store as geo_geocode_store
 
     if not GITHUB_TOKEN:
         return False, None
 
-    # ── Rule B: Geocode אוטומטי ──
-    geo = None
-    if address:
-        # הגדר GOOGLE_MAPS_API_KEY כ-env var כדי שהמודול יראה אותו
-        os.environ["GOOGLE_MAPS_API_KEY"] = GOOGLE_MAPS_API_KEY
-        geo = geo_geocode(address, city)
+    # ── Rule B: Geocode אוטומטי — Places API ראשון (לפי שם), Geocoding fallback ──
+    os.environ["GOOGLE_MAPS_API_KEY"] = GOOGLE_MAPS_API_KEY
+    geo = geo_geocode_store(name, address, city)
 
     lat = str(geo["lat"])   if geo else ""
     lon = str(geo["lon"])   if geo else ""
