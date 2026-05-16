@@ -51,10 +51,21 @@ def _parse_date(raw: str) -> datetime | None:
 
 
 def _sim(a: str, b: str) -> int:
-    """אחוז דמיון בין שתי מחרוזות (0-100)."""
+    """
+    אחוז דמיון בין שתי מחרוזות (0-100).
+    לוקח את המקסימום מבין:
+      1. דמיון רצפי רגיל (SequenceMatcher)
+      2. דמיון לפי מילים ממוינות — עמיד לסדר מילים שונה
+         לדוגמה: "שילב שפיגל פתח תקווה" ↔ "שילב פתח תקווה שפיגל" → 100%
+    """
     if not a or not b:
         return 0
-    return int(SequenceMatcher(None, a.strip(), b.strip()).ratio() * 100)
+    a, b = a.strip(), b.strip()
+    seq_score  = SequenceMatcher(None, a, b).ratio()
+    a_sorted   = " ".join(sorted(a.split()))
+    b_sorted   = " ".join(sorted(b.split()))
+    sort_score = SequenceMatcher(None, a_sorted, b_sorted).ratio()
+    return int(max(seq_score, sort_score) * 100)
 
 
 def _normalize(name: str) -> str:
