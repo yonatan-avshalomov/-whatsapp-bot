@@ -915,11 +915,24 @@ def build_context(user_msg, stores, deliveries, notes, visits):
     else:
         lines.append(f"\n👣 ביקורים ידניים היום: אין — המשתמש לא הזין ביקורים להיום")
 
-    # הערות
+    # הערות — אם המשתמש שאל על חנות ספציפית, הצג רק שלה
     if notes:
-        lines.append(f"\nהערות שטח אחרונות:")
-        for n in notes[-10:]:
-            lines.append(f"• {n.get('date','')} | {n.get('store','')} — {n.get('note','')}")
+        # בדוק אם נשאלה חנות ספציפית
+        specific_store_notes = []
+        for s in stores:
+            if s["name"] in user_msg or (s["city"] and s["city"] in user_msg and s["name"] in user_msg):
+                specific_store_notes = [n for n in notes if n.get("store","") == s["name"]]
+                if specific_store_notes:
+                    lines.append(f"\n📝 הערות על {s['name']} ({len(specific_store_notes)} הערות):")
+                    for n in sorted(specific_store_notes, key=lambda x: x.get("date",""), reverse=True)[:8]:
+                        lines.append(f"• {n.get('date','')} — {n.get('note','')}")
+                    break
+
+        # אם לא נשאלה חנות ספציפית — הצג אחרונות
+        if not specific_store_notes:
+            lines.append(f"\nהערות שטח אחרונות ({len(notes)} סה\"כ):")
+            for n in sorted(notes, key=lambda x: x.get("date",""), reverse=True)[:10]:
+                lines.append(f"• {n.get('date','')} | {n.get('store','')} — {n.get('note','')}")
 
     return "\n".join(lines)[:12000]
 
@@ -1153,22 +1166,69 @@ with tab2:
         else:
             st.error("נא לבחור חנות ולכתוב הערה")
 
-    # הצג הערות אחרונות
     st.divider()
-    st.subheader("הערות אחרונות")
     all_notes = get_notes()
     local     = st.session_state.get("local_notes", [])
-    combined  = (all_notes + local)[-15:][::-1]
+    all_combined = all_notes + local
+
+    # ── הערות לחנות שנבחרה ──────────────────────────────
+    if selected_store:
+        store_notes = [n for n in all_combined
+                       if n.get("store","").strip() == selected_store.strip()]
+        store_notes = sorted(store_notes, key=lambda n: n.get("date",""), reverse=True)
+
+        st.subheader(f"📋 הערות על: {selected_store}")
+        if store_notes:
+            for n in store_notes:
+                note_txt = n.get("note","")
+                # צבע לפי סוג הערה
+                if "ביקרתי" in note_txt or "ביקור" in note_txt:
+                    border_color = "#2E7D32"
+                elif "לא הגעתי" in note_txt:
+                    border_color = "#C62828"
+                elif "הזמנה" in note_txt or "דליל" in note_txt:
+                    border_color = "#E65100"
+                else:
+                    border_color = "#1565C0"
+
+                st.markdown(f"""<div class='note-card' style='border-right: 4px solid {border_color};'>
+                    <small style='color:#888'>{n.get('date','')}</small><br>
+                    {note_txt}
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.info("אין הערות עדיין לחנות זו")
+
+    # ── כל ההערות האחרונות ──────────────────────────────
+    st.divider()
+    st.subheader("🕐 הערות אחרונות (כל החנויות)")
+
+    search_note = st.text_input("🔍 חפש בהערות", placeholder="שם חנות / מילה מהערה...", key="note_search")
+
+    combined = sorted(all_combined, key=lambda n: n.get("date",""), reverse=True)
+    if search_note:
+        combined = [n for n in combined
+                    if search_note in n.get("store","") or search_note in n.get("note","")]
+
+    combined = combined[:20]
 
     if combined:
         for n in combined:
-            st.markdown(f"""<div class='note-card'>
-                <b>{n.get('store','')}</b> — {n.get('city','')}<br>
-                <small>{n.get('date','')}</small><br>
-                {n.get('note','')}
+            note_txt = n.get("note","")
+            if "ביקרתי" in note_txt or "ביקור" in note_txt:
+                border_color = "#2E7D32"
+            elif "לא הגעתי" in note_txt:
+                border_color = "#C62828"
+            elif "הזמנה" in note_txt or "דליל" in note_txt:
+                border_color = "#E65100"
+            else:
+                border_color = "#1565C0"
+            st.markdown(f"""<div class='note-card' style='border-right: 4px solid {border_color};'>
+                <b>{n.get('store','')}</b> — <small>{n.get('city','')}</small>
+                &nbsp;&nbsp;<small style='color:#888'>{n.get('date','')}</small><br>
+                {note_txt}
             </div>""", unsafe_allow_html=True)
     else:
-        st.info("אין הערות עדיין")
+        st.info("אין הערות")
 
 
 # ════════════════════════════
@@ -1610,6 +1670,8 @@ with tab6:
         st.caption(f"מציג {len(display_stores)} חנויות")
 
         # ── טבלה ────────────────────────────────────
+        tab6_notes = get_notes() + st.session_state.get("local_notes", [])
+
         for s in display_stores:
             name  = s["name"]
             city  = s.get("city", "")
@@ -1620,29 +1682,68 @@ with tab6:
             count = stats.get("visit_count", 0)
             label = urgency_label(days)
 
-            with st.expander(f"{label}  |  **{name}**  ({city})", expanded=False):
+            # הערות לחנות זו
+            store_notes = sorted(
+                [n for n in tab6_notes if n.get("store","").strip() == name.strip()],
+                key=lambda n: n.get("date",""), reverse=True
+            )
+            notes_badge = f" 📝{len(store_notes)}" if store_notes else ""
+
+            with st.expander(f"{label}  |  **{name}**  ({city}){notes_badge}", expanded=False):
                 c1, c2, c3 = st.columns(3)
                 c1.metric("ביקור אחרון", last)
                 c2.metric("ימים מאז", days if days is not None else "—")
                 c3.metric("ביקורים ב-3 חודשים", count)
 
-                # היסטוריית ביקורים
+                # ── היסטוריית ביקורים ──
                 visits_list = stats.get("visits", [])
                 if visits_list:
-                    st.caption("**היסטוריית ביקורים:**")
+                    st.caption("**📦 היסטוריית ביקורים:**")
                     for v in visits_list[:8]:
                         src_icon = "📦" if v["source"] == "delivery" else "✋"
                         note_str = f" | תעודה #{v['note_id']}" if v.get("note_id") else ""
                         st.text(f"  {src_icon} {v['date'].strftime('%d/%m/%y')}{note_str}")
 
-                # כפתור רישום ביקור
-                if st.button(f"✅ סמן ביקרתי עכשיו", key=f"visit_{name}"):
-                    today_str = today_il()
-                    ok = save_visit_to_github(today_str, name, city, "ביקור", "")
-                    if ok:
-                        get_manual_visits.clear()
-                        st.success("✅ נרשם!")
-                        st.rerun()
+                # ── הערות CRM ──
+                if store_notes:
+                    st.caption("**📝 הערות שטח:**")
+                    for n in store_notes[:5]:
+                        note_txt = n.get("note","")
+                        if "ביקרתי" in note_txt:
+                            icon = "✅"
+                        elif "לא הגעתי" in note_txt:
+                            icon = "❌"
+                        elif "הזמנה" in note_txt or "דליל" in note_txt:
+                            icon = "📋"
+                        else:
+                            icon = "💬"
+                        st.markdown(
+                            f"&nbsp;&nbsp;{icon} **{n.get('date','')}** — {note_txt}",
+                            unsafe_allow_html=True
+                        )
+
+                st.divider()
+                col_a, col_b = st.columns([2, 1])
+                with col_b:
+                    # כפתור רישום ביקור מהיר
+                    if st.button("✅ ביקרתי עכשיו", key=f"visit_{name}"):
+                        today_str = today_il()
+                        ok = save_visit_to_github(today_str, name, city, "ביקור", "")
+                        if ok:
+                            get_manual_visits.clear()
+                            st.success("✅ נרשם!")
+                            st.rerun()
+                with col_a:
+                    # הוספת הערה מהירה ישירות מהטאב
+                    quick_note = st.text_input("הערה מהירה", key=f"qnote_{name}",
+                                               placeholder="הוסף הערה...")
+                    if st.button("💾 שמור הערה", key=f"qsave_{name}") and quick_note:
+                        ok = save_note_to_github(today_il(), name, city,
+                                                  f"[הערה כללית] {quick_note}")
+                        if ok:
+                            get_notes.clear()
+                            st.success("✅ הערה נשמרה!")
+                            st.rerun()
 
     st.divider()
 
