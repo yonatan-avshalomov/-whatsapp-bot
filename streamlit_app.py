@@ -349,6 +349,20 @@ def get_aliases() -> dict:
         return {}
 
 
+@st.cache_data(ttl=300)
+def get_visit_stats_cached(stores_key: int, deliveries_key: int,
+                            manual_key: int, aliases_key: int) -> dict:
+    """מחשב סטטיסטיקות ביקורים עם cache — קריאה יקרה, מוקפאת 5 דקות."""
+    return get_all_visit_stats(get_stores(), get_deliveries(),
+                                get_manual_visits(), aliases=get_aliases())
+
+
+@st.cache_data(ttl=600)
+def get_unmatched_cached(deliveries_key: int, stores_key: int, aliases_key: int) -> list:
+    """מחשב תעודות לא מזוהות עם cache — קריאה כבדה, מוקפאת 10 דקות."""
+    return get_unmatched_branches(get_deliveries(), get_stores(), get_aliases())
+
+
 def save_alias_to_db(branch_raw: str, store_name: str) -> bool:
     """שומר alias חדש ל-Supabase."""
     try:
@@ -1795,7 +1809,9 @@ with tab6:
         v_deliveries = get_deliveries()
         v_manual     = get_manual_visits()
         v_aliases    = get_aliases()
-        visit_stats  = get_all_visit_stats(v_stores, v_deliveries, v_manual, aliases=v_aliases)
+        # cache key — מספר שורות כ-proxy לשינוי תוכן
+        _vk = (len(v_stores), len(v_deliveries), len(v_manual), len(v_aliases))
+        visit_stats  = get_visit_stats_cached(*_vk)
 
     # ── נתונים כלליים ──────────────────────────────
     total       = len(v_stores)
@@ -1980,11 +1996,19 @@ with tab6:
     st.subheader("🔍 תעודות לא מזוהות")
     st.caption("סניפים בתעודות משלוח שלא זוהו אוטומטית. אשר את ההתאמה הנכונה כדי לשפר את המעקב.")
 
-    with st.spinner("מחפש תעודות לא מזוהות..."):
-        unmatched_branches = get_unmatched_branches(v_deliveries, v_stores, v_aliases)
+    if st.button("🔍 טען תעודות לא מזוהות", key="load_unmatched"):
+        st.session_state["show_unmatched"] = True
 
-    if not unmatched_branches:
+    unmatched_branches = []
+    if st.session_state.get("show_unmatched"):
+        with st.spinner("מחפש תעודות לא מזוהות..."):
+            _uk = (len(v_deliveries), len(v_stores), len(v_aliases))
+            unmatched_branches = get_unmatched_cached(*_uk)
+
+    if st.session_state.get("show_unmatched") and not unmatched_branches:
         st.success("✅ כל התעודות זוהו! אין רשומות לא מזוהות.")
+    elif not unmatched_branches:
+        pass  # טרם נטען
     else:
         st.warning(f"נמצאו **{len(unmatched_branches)}** סניפים לא מזוהים בתעודות המשלוח")
         st.caption("לחץ ✅ ליד ההתאמה הנכונה — תעודות עתידיות יזוהו אוטומטית.")
