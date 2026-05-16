@@ -137,7 +137,8 @@ def _match_branch_to_store(branch_norm: str,
 def get_all_visit_stats(stores:        list[dict],
                          deliveries:    list[dict],
                          manual_visits: list[dict],
-                         months_back:   int = MONTHS_BACK) -> dict:
+                         months_back:   int = MONTHS_BACK,
+                         aliases:       dict = None) -> dict:
     """
     מחזיר מילון עם סטטיסטיקות ביקורים לכל חנות.
 
@@ -154,6 +155,9 @@ def get_all_visit_stats(stores:        list[dict],
       }
     }
     """
+    if aliases is None:
+        aliases = {}
+
     cutoff = datetime.now() - timedelta(days=months_back * 30)
 
     # ── בנה מילון חנויות ──
@@ -192,11 +196,15 @@ def get_all_visit_stats(stores:        list[dict],
         if re.match(r'^\d{2}/\d{2}', branch_raw):
             continue
 
-        matched = _match_branch_to_store(branch_norm, store_names_list, match_cache)
-        if not matched:
-            continue
+        # ── בדוק alias (מאושר ידנית) לפני fuzzy match ──
+        if branch_norm in aliases:
+            store_name = aliases[branch_norm]
+        else:
+            matched = _match_branch_to_store(branch_norm, store_names_list, match_cache)
+            if not matched:
+                continue
+            store_name = store_names_norm.get(matched, matched)
 
-        store_name = store_names_norm.get(matched, matched)
         if store_name not in result:
             continue
 
@@ -298,6 +306,89 @@ def get_overdue_stores(stats: dict, stores: list[dict],
         if days is not None and days >= threshold_days:
             overdue.append({**s, "days_since": days})
     return sorted(overdue, key=lambda x: x["days_since"], reverse=True)
+
+
+def get_unmatched_branches(deliveries:    list[dict],
+                            stores:        list[dict],
+                            aliases:       dict = None,
+                            months_back:   int  = MONTHS_BACK) -> list[dict]:
+    """
+    מחזיר רשימת סניפים בתעודות משלוח שלא ניתן להתאים לחנות קיימת.
+    כל פריט: {branch_raw, branch_norm, count, dates, top3}
+    top3 = [(store_name, score%), ...]  — 3 ההצעות הטובות ביותר.
+
+    Rule B — Smart Suggestions.
+    """
+    if aliases is None:
+        aliases = {}
+
+    cutoff = datetime.now() - timedelta(days=months_back * 30)
+    store_names_norm = {_normalize(s["name"]): s["name"] for s in stores}
+    store_names_list = list(store_names_norm.keys())
+
+    GARBAGE = ['בל בוקס','מור סילבר','ביו גאיה','סופרסאפ','ווולט',
+               'תעודת משלוח רכש','הזמנת רכש','פרסום','אתר סחר',
+               'מחסן ','מכירות']
+
+    unmatched: dict[str, dict] = {}   # branch_norm → info
+
+    for row in deliveries:
+        branch_raw = row.get("branch", "").strip()
+        date_raw   = row.get("date",   "").strip()
+
+        if not branch_raw or not date_raw:
+            continue
+
+        dt = _parse_date(date_raw)
+        if not dt or dt < cutoff:
+            continue
+
+        if any(g in branch_raw for g in GARBAGE):
+            continue
+        if re.match(r'^\d{2}/\d{2}', branch_raw):
+            continue
+
+        branch_norm = _normalize(branch_raw)
+
+        # כבר יש alias מאושר — לא רלוונטי
+        if branch_norm in aliases:
+            continue
+
+        # בדוק אם fuzzy match מצליח
+        best_score = 0
+        for s_name in store_names_list:
+            score = _sim(branch_norm, s_name)
+            if score > best_score:
+                best_score = score
+            if best_score == 100:
+                break
+
+        if best_score >= MATCH_THRESH:
+            continue   # מזוהה אוטומטית — OK
+
+        # לא מזוהה — אסוף
+        if branch_norm not in unmatched:
+            unmatched[branch_norm] = {
+                "branch_raw":  branch_raw,
+                "branch_norm": branch_norm,
+                "count": 0,
+                "dates": [],
+            }
+        unmatched[branch_norm]["count"] += 1
+        unmatched[branch_norm]["dates"].append(dt.strftime("%d/%m/%y"))
+
+    # ── חשב top-3 הצעות לכל סניף לא מזוהה ──
+    result = []
+    for bn, info in unmatched.items():
+        scores = [
+            (store_names_norm[sn], _sim(bn, sn))
+            for sn in store_names_list
+        ]
+        top3 = sorted(scores, key=lambda x: x[1], reverse=True)[:3]
+        result.append({**info, "top3": top3})
+
+    # מיין לפי מספר תעודות (הכי שכיח קודם)
+    return sorted(result, key=lambda x: x["count"], reverse=True)
 
 
 # ── הרצה ישירה (בדיקה) ────────────────────────────────────

@@ -182,6 +182,51 @@ class StoreDatabase:
 
         return {"notes": n_notes, "visits": n_visits, "errors": errors}
 
+    # ══════════════════════════════════════
+    # Store Aliases (Rule B)
+    # ══════════════════════════════════════
+
+    def get_aliases(self) -> dict:
+        """
+        מחזיר מילון aliasים: {branch_norm: store_name}
+        מאפשר התאמה אוטומטית לתעודות שאושרו ידנית.
+        """
+        try:
+            res = (self.client.table("store_aliases")
+                   .select("branch_norm,store_name")
+                   .execute())
+            return {row["branch_norm"]: row["store_name"] for row in (res.data or [])}
+        except Exception as e:
+            print(f"[DB] get_aliases error: {e}")
+            return {}
+
+    def save_alias(self, branch_raw: str, store_name: str) -> bool:
+        """
+        שומר alias חדש (upsert לפי branch_norm).
+        branch_raw — שם הסניף הגולמי מהתעודה
+        store_name — שם החנות הקנוני מ-stores.csv
+        """
+        try:
+            from visit_tracker import _normalize
+            branch_norm = _normalize(branch_raw)
+            self.client.table("store_aliases").upsert({
+                "branch_norm": branch_norm,
+                "store_name":  store_name,
+            }, on_conflict="branch_norm").execute()
+            return True
+        except Exception as e:
+            print(f"[DB] save_alias error: {e}")
+            return False
+
+    def delete_alias(self, branch_norm: str) -> bool:
+        """מוחק alias לפי branch_norm."""
+        try:
+            self.client.table("store_aliases").delete().eq("branch_norm", branch_norm).execute()
+            return True
+        except Exception as e:
+            print(f"[DB] delete_alias error: {e}")
+            return False
+
     def is_connected(self) -> bool:
         """בדיקת חיבור לDB."""
         try:

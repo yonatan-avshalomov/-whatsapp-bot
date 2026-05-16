@@ -8,7 +8,7 @@ import re
 import math
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
-from visit_tracker import get_all_visit_stats, urgency_label, urgency_color_hex, get_overdue_stores, get_never_visited
+from visit_tracker import get_all_visit_stats, urgency_label, urgency_color_hex, get_overdue_stores, get_never_visited, get_unmatched_branches
 from route_planner import optimize_route, build_gmaps_url, build_waze_url, build_qr_code, total_distance, filter_stores
 from database import db as supabase_db
 from kml_exporter import build_kml, build_kml_filename
@@ -338,6 +338,26 @@ def get_manual_visits():
         return list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
     except Exception:
         return []
+
+
+@st.cache_data(ttl=300)
+def get_aliases() -> dict:
+    """טוען aliasים מאושרים מ-Supabase — {branch_norm: store_name}."""
+    try:
+        return supabase_db.get_aliases()
+    except Exception:
+        return {}
+
+
+def save_alias_to_db(branch_raw: str, store_name: str) -> bool:
+    """שומר alias חדש ל-Supabase."""
+    try:
+        ok = supabase_db.save_alias(branch_raw, store_name)
+        if ok:
+            get_aliases.clear()
+        return ok
+    except Exception:
+        return False
 
 
 def save_note_to_github(date, store, city, note):
@@ -1683,10 +1703,11 @@ with tab6:
     st.subheader("📅 מעקב ביקורים — 3 חודשים אחרונים")
 
     with st.spinner("מחשב היסטוריית ביקורים..."):
-        v_stores    = get_stores()
+        v_stores     = get_stores()
         v_deliveries = get_deliveries()
-        v_manual    = get_manual_visits()
-        visit_stats = get_all_visit_stats(v_stores, v_deliveries, v_manual)
+        v_manual     = get_manual_visits()
+        v_aliases    = get_aliases()
+        visit_stats  = get_all_visit_stats(v_stores, v_deliveries, v_manual, aliases=v_aliases)
 
     # ── נתונים כלליים ──────────────────────────────
     total       = len(v_stores)
@@ -1865,6 +1886,63 @@ with tab6:
                         st.error("❌ שגיאה בשמירה לגיטהאב.")
         except Exception as e:
             st.error(f"❌ שגיאה בקריאת הקובץ: {e}")
+
+    # ── Rule B: תעודות לא מזוהות — הצעות התאמה ────────────
+    st.divider()
+    st.subheader("🔍 תעודות לא מזוהות")
+    st.caption("סניפים בתעודות משלוח שלא זוהו אוטומטית. אשר את ההתאמה הנכונה כדי לשפר את המעקב.")
+
+    with st.spinner("מחפש תעודות לא מזוהות..."):
+        unmatched_branches = get_unmatched_branches(v_deliveries, v_stores, v_aliases)
+
+    if not unmatched_branches:
+        st.success("✅ כל התעודות זוהו! אין רשומות לא מזוהות.")
+    else:
+        st.warning(f"נמצאו **{len(unmatched_branches)}** סניפים לא מזוהים בתעודות המשלוח")
+        st.caption("לחץ ✅ ליד ההתאמה הנכונה — תעודות עתידיות יזוהו אוטומטית.")
+
+        for item in unmatched_branches[:25]:
+            branch_raw  = item["branch_raw"]
+            branch_norm = item["branch_norm"]
+            count       = item["count"]
+            top3        = item["top3"]
+            last_dates  = item["dates"][:3]
+
+            with st.expander(
+                f"📦 **{branch_raw}** — {count} תעודות | אחרון: {last_dates[0] if last_dates else '—'}",
+                expanded=False
+            ):
+                st.caption(f"שם מנורמל: `{branch_norm}`")
+                st.markdown("**הצעות התאמה:**")
+
+                for store_name, score in top3:
+                    col_a, col_b = st.columns([5, 1])
+                    score_emoji = "🟢" if score >= 60 else "🟡" if score >= 40 else "🔴"
+                    col_a.write(f"{score_emoji} **{store_name}** — דמיון: {score}%")
+                    if col_b.button("✅ אשר", key=f"alias_{branch_norm}_{store_name}",
+                                    use_container_width=True):
+                        if save_alias_to_db(branch_raw, store_name):
+                            st.success(f"✅ נשמר: {branch_raw} → {store_name}")
+                            st.rerun()
+                        else:
+                            st.error("❌ שגיאה בשמירת ה-alias")
+
+                st.divider()
+                # אפשרות לבחור חנות חופשית אם אין הצעה טובה
+                all_store_names = sorted([s["name"] for s in v_stores])
+                manual_pick = st.selectbox(
+                    "או בחר ידנית:",
+                    ["— בחר חנות —"] + all_store_names,
+                    key=f"manual_alias_{branch_norm}"
+                )
+                if manual_pick != "— בחר חנות —":
+                    if st.button("💾 שמור בחירה ידנית", key=f"manual_save_{branch_norm}",
+                                 type="primary"):
+                        if save_alias_to_db(branch_raw, manual_pick):
+                            st.success(f"✅ נשמר: {branch_raw} → {manual_pick}")
+                            st.rerun()
+                        else:
+                            st.error("❌ שגיאה בשמירת ה-alias")
 
 
 # ════════════════════════════════════════════════════
