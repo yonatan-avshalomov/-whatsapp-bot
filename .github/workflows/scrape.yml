@@ -33,8 +33,7 @@ jobs:
       - name: Install Playwright
         run: |
           pip install playwright
-          playwright install chromium
-          playwright install-deps chromium
+          playwright install --with-deps chromium
 
       - name: Run Senzey scraper
         env:
