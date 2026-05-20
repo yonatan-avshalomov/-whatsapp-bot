@@ -1959,6 +1959,27 @@ with tab6:
 
     st.divider()
 
+    # ── ניקוי נתונים (Task 4) ──────────────────────
+    with st.expander("🗑️ ניקוי נתונים ישנים וכפולים", expanded=False):
+        st.caption("מוחק כפילויות ותעודות ישנות מ-Supabase + מרענן cache")
+        months_clean = st.slider("מחק תעודות ישנות מ-N חודשים", 1, 6, 3, key="gc_months")
+        if st.button("🗑️ הפעל ניקוי", key="run_gc", type="secondary"):
+            with st.spinner("מנקה..."):
+                try:
+                    from supabase_stores import run_data_cleanup
+                    result = run_data_cleanup(months_back=months_clean)
+                    st.success(
+                        f"✅ ניקוי הושלם!\n\n"
+                        f"- כפילויות שנמחקו: {result.get('duplicates_deleted', 0)}\n"
+                        f"- תעודות ישנות שנמחקו: {result.get('old_records_deleted', 0)}\n"
+                        f"- Cache אופס: ✅"
+                    )
+                    st.rerun()
+                except Exception as _gc_err:
+                    st.error(f"❌ שגיאה בניקוי: {_gc_err}")
+
+    st.divider()
+
     # ── העלאת תעודות משלוח ──────────────────────────
     st.subheader("📤 העלאת תעודות משלוח")
     st.caption("העלה קובץ CSV עם עמודות: id, date, branch (כמו senzey_data.csv)")
@@ -2258,14 +2279,30 @@ with tab8:
 
             map_data = st_folium(m, use_container_width=True, height=420, key="fix_map")
 
-            # ── עיבוד לחיצה ──────────────────────────────
+            # ── GPS מהנייד (לחלופין ללחיצה על המפה) ──────
+            st.divider()
+            st.caption("או: קבל מיקום ישירות מהטלפון:")
+            from gps_component import render_gps_button, save_store_location
+            gps_coords = render_gps_button(key="tab8_gps")
+            if gps_coords:
+                st.session_state["gps_lat"] = gps_coords["lat"]
+                st.session_state["gps_lon"] = gps_coords["lon"]
+                st.success(f"📡 GPS: **{gps_coords['lat']}, {gps_coords['lon']}**")
+
+            # ── עיבוד מיקום (מפה או GPS) ──────────────────
             new_lat = new_lon = None
-            if map_data and map_data.get("last_clicked"):
+
+            # GPS גובר על לחיצת מפה אם קיים
+            if st.session_state.get("gps_lat") and st.session_state.get("gps_lon"):
+                new_lat = round(st.session_state["gps_lat"], 6)
+                new_lon = round(st.session_state["gps_lon"], 6)
+                st.info(f"📡 מיקום מהטלפון: **{new_lat}, {new_lon}**")
+            elif map_data and map_data.get("last_clicked"):
                 new_lat = round(map_data["last_clicked"]["lat"], 6)
                 new_lon = round(map_data["last_clicked"]["lng"], 6)
+                st.success(f"📍 נבחר מיקום מהמפה: **{new_lat}, {new_lon}**")
 
-                st.success(f"📍 נבחר מיקום: **{new_lat}, {new_lon}**")
-
+            if new_lat and new_lon:
                 if st.button("💾 שמור מיקום חדש", key="fix_save", type="primary", use_container_width=True):
                     # עדכן GitHub
                     import base64
@@ -2307,6 +2344,9 @@ with tab8:
                         res = requests.put(api, headers=gh_headers, json=payload)
                         if res.status_code in (200, 201):
                             st.success(f"✅ מיקום עודכן! {chosen['name']} → {new_lat}, {new_lon}")
+                            # נקה GPS session state
+                            st.session_state.pop("gps_lat", None)
+                            st.session_state.pop("gps_lon", None)
                             get_stores.clear()
                             st.balloons()
                         else:
@@ -2314,7 +2354,7 @@ with tab8:
                     else:
                         st.error("לא נמצאה החנות ב-CSV")
             else:
-                st.caption("⬆️ לחץ על המפה כדי לבחור מיקום")
+                st.caption("⬆️ לחץ על המפה או השתמש ב-GPS מהנייד")
 
     except Exception as e:
         st.error(f"שגיאה בטעינת מפת תיקון מיקום: {e}")

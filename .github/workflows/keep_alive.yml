@@ -1,0 +1,32 @@
+name: Keep Render Alive
+
+on:
+  schedule:
+    # כל 10 דקות בין 05:00-18:00 UTC = 08:00-21:00 שעון ישראל (קיץ UTC+3)
+    - cron: '*/10 5-18 * * 0-4'   # ראשון-חמישי
+    - cron: '*/10 5-13 * * 5'     # שישי עד 16:00 ישראל
+  workflow_dispatch:               # טריגר ידני לבדיקה
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping Render app
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 30 \
+            --retry 2 \
+            --retry-delay 5 \
+            "https://whatsapp-bot-3s3w.onrender.com/_stcore/health")
+
+          echo "HTTP status: $STATUS"
+
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ האפליקציה ערה"
+          else
+            echo "⚠️ סטטוס לא תקין: $STATUS — Render אולי מתעורר, ממתין..."
+            sleep 30
+            curl -s -o /dev/null "https://whatsapp-bot-3s3w.onrender.com" || true
+          fi
