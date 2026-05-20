@@ -6,6 +6,8 @@ import os
 import json
 import re
 import math
+import base64
+import time
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 import openai as _openai_mod
@@ -187,7 +189,6 @@ CITY_COORDS = {
     "מעלה אדומים":    (31.777, 35.302),
     "כפר ויתקין":     (32.375, 34.905),
     "גן שמואל":       (32.465, 34.959),
-    "נתיבות":         (31.424, 34.591),
     "רמת ישי":        (32.708, 35.168),
     "קרית ים":        (32.854, 35.073),
 }
@@ -366,25 +367,31 @@ def get_aliases() -> dict:
         return {}
 
 
-@st.cache_data(ttl=300)
 def get_visit_stats_cached() -> dict:
-    """מחשב סטטיסטיקות ביקורים עם cache — מוקפא 5 דקות.
-    לא מקבל ארגומנטים כדי למנוע hashing יקר של רשימות גדולות."""
-    stores     = get_stores()
-    deliveries = get_deliveries()
-    manual     = get_manual_visits()
-    aliases    = get_aliases()
-    return get_all_visit_stats(stores, deliveries, manual, aliases=aliases)
+    """מחשב סטטיסטיקות ביקורים עם cache ב-session_state — מוקפא 5 דקות.
+    משתמש ב-session_state במקום @st.cache_data כדי להימנע מ-nested cache warning."""
+    _KEY, _TS, _TTL = "_vs_result", "_vs_ts", 300
+    if (st.session_state.get(_KEY) is not None and
+            time.time() - st.session_state.get(_TS, 0) < _TTL):
+        return st.session_state[_KEY]
+    result = get_all_visit_stats(
+        get_stores(), get_deliveries(), get_manual_visits(), aliases=get_aliases()
+    )
+    st.session_state[_KEY] = result
+    st.session_state[_TS]  = time.time()
+    return result
 
 
-@st.cache_data(ttl=600)
 def get_unmatched_cached() -> list:
-    """מחשב תעודות לא מזוהות עם cache — מוקפא 10 דקות.
-    לא מקבל ארגומנטים כדי למנוע hashing יקר של רשימות גדולות."""
-    deliveries = get_deliveries()
-    stores     = get_stores()
-    aliases    = get_aliases()
-    return get_unmatched_branches(deliveries, stores, aliases)
+    """מחשב תעודות לא מזוהות עם cache ב-session_state — מוקפא 10 דקות."""
+    _KEY, _TS, _TTL = "_um_result", "_um_ts", 600
+    if (st.session_state.get(_KEY) is not None and
+            time.time() - st.session_state.get(_TS, 0) < _TTL):
+        return st.session_state[_KEY]
+    result = get_unmatched_branches(get_deliveries(), get_stores(), get_aliases())
+    st.session_state[_KEY] = result
+    st.session_state[_TS]  = time.time()
+    return result
 
 
 def save_alias_to_db(branch_raw: str, store_name: str) -> bool:
@@ -402,12 +409,11 @@ def _github_update_file(filename: str, transform_fn, commit_msg: str) -> bool:
     """עוזר גנרי לעדכון קובץ ב-GitHub: GET → decode → transform → encode → PUT."""
     if not GITHUB_TOKEN:
         return False
-    import base64
     api     = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}",
                "Accept": "application/vnd.github.v3+json"}
     try:
-        r    = requests.get(api, headers=headers)
+        r    = requests.get(api, headers=headers, timeout=15)
         data = r.json()
         sha  = data.get("sha", "")
         current = base64.b64decode(data["content"]).decode("utf-8-sig") if "content" in data else ""
@@ -415,7 +421,7 @@ def _github_update_file(filename: str, transform_fn, commit_msg: str) -> bool:
         payload = {"message": commit_msg,
                    "content": base64.b64encode(updated.encode("utf-8")).decode(),
                    "sha": sha}
-        r = requests.put(api, headers=headers, json=payload)
+        r = requests.put(api, headers=headers, json=payload, timeout=15)
         return r.status_code in [200, 201]
     except Exception:
         return False
@@ -503,7 +509,6 @@ def save_store_to_github(name: str, city: str, address: str,
     -------
     (success: bool, geocode_result: dict | None)
     """
-    import base64
     from geocoder import geocode_store as geo_geocode_store
 
     if not GITHUB_TOKEN:
@@ -522,7 +527,7 @@ def save_store_to_github(name: str, city: str, address: str,
                "Accept": "application/vnd.github.v3+json"}
 
     try:
-        r    = requests.get(api, headers=headers)
+        r    = requests.get(api, headers=headers, timeout=15)
         data = r.json()
         sha  = data.get("sha", "")
         current_csv = base64.b64decode(data["content"]).decode("utf-8-sig") if "content" in data else ""
@@ -540,7 +545,7 @@ def save_store_to_github(name: str, city: str, address: str,
     }
 
     try:
-        r = requests.put(api, headers=headers, json=payload)
+        r = requests.put(api, headers=headers, json=payload, timeout=15)
         success = r.status_code in [200, 201]
         return success, geo
     except Exception:
@@ -1217,8 +1222,7 @@ with tab2:
                     _oa_client = _openai_mod.OpenAI(api_key=OPENAI_API_KEY)
                     audio_bytes = voice_file.read()
                     # Whisper API requires a file-like object with a name
-                    import io as _io
-                    audio_buf = _io.BytesIO(audio_bytes)
+                    audio_buf = io.BytesIO(audio_bytes)
                     audio_buf.name = voice_file.name
                     transcript_resp = _oa_client.audio.transcriptions.create(
                         model="whisper-1",
@@ -1444,10 +1448,8 @@ with tab3:
 # ════════════════════════════
 # לשונית 4 — מפה
 # ════════════════════════════
-@st.cache_data(ttl=300)
 def build_store_map_html() -> str:
-    """מייצר HTML של מפת Leaflet עם כל החנויות + סטטוס ביקור.
-    לא מקבל ארגומנטים כדי למנוע hashing יקר של רשימות גדולות."""
+    """מייצר HTML של מפת Leaflet עם כל החנויות + סטטוס ביקור."""
     stores_list     = get_stores()
     deliveries_list = get_deliveries()
     visits_list     = get_manual_visits()
@@ -1510,13 +1512,17 @@ def build_store_map_html() -> str:
         """green / orange / red based on days since last visit."""
         if not raw:
             return "#CC2200"
-        try:
-            fmt = "%d/%m/%y %H:%M" if "/" in raw and len(raw) >= 14 else "%Y-%m-%d"
-            src = raw[:14] if "/" in raw else raw[:10]
-            dt  = datetime.strptime(src, fmt if "/" in raw else "%Y-%m-%d")
-            diff = (now_il().replace(tzinfo=None) - dt).days
-        except Exception:
+        dt = None
+        for fmt, slen in [("%d/%m/%y %H:%M", 14), ("%d/%m/%Y %H:%M", 16),
+                          ("%d/%m/%y", 8), ("%d/%m/%Y", 10), ("%Y-%m-%d", 10)]:
+            try:
+                dt = datetime.strptime(raw[:slen], fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
             return "#CC2200"
+        diff = (now_il().replace(tzinfo=None) - dt).days
         if diff <= 7:  return "#22AA22"
         if diff <= 21: return "#FF8800"
         if diff <= 60: return "#FF8800"
@@ -1731,83 +1737,6 @@ with tab4:
     )
 
 
-# ════════════════════════════════════════════
-# לשונית 5 — הוספת חנות חדשה (Rule A + Rule B)
-# ════════════════════════════════════════════
-with tab5:
-    st.subheader("➕ הוסף חנות חדשה")
-
-    if not GITHUB_TOKEN:
-        st.error("❌ GITHUB_TOKEN לא מוגדר — לא ניתן לשמור.")
-        st.stop()
-
-    if not GOOGLE_MAPS_API_KEY:
-        st.warning("⚠️ GOOGLE_MAPS_API_KEY לא מוגדר — הגיאוקודינג יתבצע דרך OpenStreetMap (פחות מדויק).")
-
-    # ── טופס ──────────────────────────────────────────────
-    with st.form("add_store_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            new_name  = st.text_input("שם החנות *", placeholder="שילב פתח תקווה קניון")
-            new_city  = st.text_input("עיר *", placeholder="פתח תקווה")
-            new_chain = st.selectbox("רשת", ["שילב", "מכבי פארם", "ניצת הדובדבן", "פרטי", ""])
-        with col2:
-            new_addr  = st.text_input("כתובת", placeholder="שד' הנשיא 30")
-            new_phone = st.text_input("טלפון", placeholder="03-1234567")
-
-        st.caption("🗺️ הגיאוקודינג מתבצע אוטומטית לפי הכתובת והעיר שהזנת.")
-        submitted = st.form_submit_button("🔍 בדוק ושמור", use_container_width=True)
-
-    # ── לוגיקה אחרי הגשה ──────────────────────────────────
-    if submitted:
-        # ── וולידציה בסיסית ──
-        if not new_name.strip() or not new_city.strip():
-            st.error("⚠️ שם חנות ועיר הם שדות חובה.")
-        else:
-            existing_stores = _stores
-
-            # ── Rule A: בדיקת כפילויות ──────────────────────
-            duplicates = find_duplicate_stores(
-                new_name, new_city, new_addr, existing_stores
-            )
-
-            if duplicates:
-                st.warning(f"⚠️ נמצאו {len(duplicates)} חנות/ות דומות — בדוק לפני שמירה!")
-                for dup in duplicates[:5]:
-                    st.markdown(
-                        f"🔁 **{dup['name']}** | {dup.get('city','')} | "
-                        f"{dup.get('address','')}  \n"
-                        f"_סיבה: {dup.get('_match_reason','')} _",
-                        unsafe_allow_html=False
-                    )
-
-                # ── אפשר המשך גם כשיש כפילות חשודה ──
-                st.divider()
-                if st.button("💾 שמור בכל זאת (אני בטוח שזו חנות חדשה)",
-                             key="force_save"):
-                    with st.spinner("מגאוקד ושומר..."):
-                        ok, geo = save_store_to_github(
-                            new_name, new_city, new_addr, new_chain, new_phone
-                        )
-                    if ok:
-                        get_stores.clear()
-                        _show_save_success(new_name, new_city, geo)
-                    else:
-                        st.error("❌ שמירה נכשלה — בדוק GITHUB_TOKEN.")
-
-            else:
-                # ── אין כפילות — שמור ישירות ──
-                with st.spinner("מגאוקד ושומר..."):
-                    ok, geo = save_store_to_github(
-                        new_name, new_city, new_addr, new_chain, new_phone
-                    )
-                if ok:
-                    get_stores.clear()
-                    _show_save_success(new_name, new_city, geo)
-                else:
-                    st.error("❌ שמירה נכשלה — בדוק GITHUB_TOKEN.")
-
-
 def _show_save_success(name: str, city: str, geo: dict | None):
     """מציג הודעת הצלחה עם פרטי גיאוקודינג."""
     st.success(f"✅ חנות **{name}** נשמרה בהצלחה!")
@@ -1820,6 +1749,82 @@ def _show_save_success(name: str, city: str, geo: dict | None):
         )
     else:
         st.warning("⚠️ לא הצלחנו לגאוקד — הכתובת נשמרה ללא GPS. תוכל לעדכן אחר כך.")
+
+
+# ════════════════════════════════════════════
+# לשונית 5 — הוספת חנות חדשה (Rule A + Rule B)
+# ════════════════════════════════════════════
+with tab5:
+    st.subheader("➕ הוסף חנות חדשה")
+
+    if not GITHUB_TOKEN:
+        st.error("❌ GITHUB_TOKEN לא מוגדר — לא ניתן לשמור.")
+    else:
+        if not GOOGLE_MAPS_API_KEY:
+            st.warning("⚠️ GOOGLE_MAPS_API_KEY לא מוגדר — הגיאוקודינג יתבצע דרך OpenStreetMap (פחות מדויק).")
+
+        # ── טופס ──────────────────────────────────────────────
+        with st.form("add_store_form", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                new_name  = st.text_input("שם החנות *", placeholder="שילב פתח תקווה קניון")
+                new_city  = st.text_input("עיר *", placeholder="פתח תקווה")
+                new_chain = st.selectbox("רשת", ["שילב", "מכבי פארם", "ניצת הדובדבן", "פרטי", ""])
+            with col2:
+                new_addr  = st.text_input("כתובת", placeholder="שד' הנשיא 30")
+                new_phone = st.text_input("טלפון", placeholder="03-1234567")
+
+            st.caption("🗺️ הגיאוקודינג מתבצע אוטומטית לפי הכתובת והעיר שהזנת.")
+            submitted = st.form_submit_button("🔍 בדוק ושמור", use_container_width=True)
+
+        # ── לוגיקה אחרי הגשה ──────────────────────────────────
+        if submitted:
+            # ── וולידציה בסיסית ──
+            if not new_name.strip() or not new_city.strip():
+                st.error("⚠️ שם חנות ועיר הם שדות חובה.")
+            else:
+                existing_stores = _stores
+
+                # ── Rule A: בדיקת כפילויות ──────────────────────
+                duplicates = find_duplicate_stores(
+                    new_name, new_city, new_addr, existing_stores
+                )
+
+                if duplicates:
+                    st.warning(f"⚠️ נמצאו {len(duplicates)} חנות/ות דומות — בדוק לפני שמירה!")
+                    for dup in duplicates[:5]:
+                        st.markdown(
+                            f"🔁 **{dup['name']}** | {dup.get('city','')} | "
+                            f"{dup.get('address','')}  \n"
+                            f"_סיבה: {dup.get('_match_reason','')} _",
+                            unsafe_allow_html=False
+                        )
+
+                    # ── אפשר המשך גם כשיש כפילות חשודה ──
+                    st.divider()
+                    if st.button("💾 שמור בכל זאת (אני בטוח שזו חנות חדשה)",
+                                 key="force_save"):
+                        with st.spinner("מגאוקד ושומר..."):
+                            ok, geo = save_store_to_github(
+                                new_name, new_city, new_addr, new_chain, new_phone
+                            )
+                        if ok:
+                            get_stores.clear()
+                            _show_save_success(new_name, new_city, geo)
+                        else:
+                            st.error("❌ שמירה נכשלה — בדוק GITHUB_TOKEN.")
+
+                else:
+                    # ── אין כפילות — שמור ישירות ──
+                    with st.spinner("מגאוקד ושומר..."):
+                        ok, geo = save_store_to_github(
+                            new_name, new_city, new_addr, new_chain, new_phone
+                        )
+                    if ok:
+                        get_stores.clear()
+                        _show_save_success(new_name, new_city, geo)
+                    else:
+                        st.error("❌ שמירה נכשלה — בדוק GITHUB_TOKEN.")
 
 
 # ════════════════════════════════════════════════════
@@ -2004,11 +2009,10 @@ with tab6:
                     use_container_width=True
                 )
                 if st.button("💾 הוסף לתעודות הקיימות ב-GitHub", key="save_deliveries"):
-                    import base64
                     api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/senzey_data.csv"
                     gh_headers = {"Authorization": f"token {GITHUB_TOKEN}",
                                   "Accept": "application/vnd.github.v3+json"}
-                    r = requests.get(api, headers=gh_headers)
+                    r = requests.get(api, headers=gh_headers, timeout=15)
                     data = r.json()
                     sha  = data.get("sha", "")
                     existing_csv = base64.b64decode(data["content"]).decode("utf-8-sig") if "content" in data else ""
@@ -2024,7 +2028,7 @@ with tab6:
                         "content": base64.b64encode(updated.encode("utf-8")).decode(),
                         "sha": sha
                     }
-                    resp = requests.put(api, headers=gh_headers, json=payload)
+                    resp = requests.put(api, headers=gh_headers, json=payload, timeout=15)
                     if resp.status_code in [200, 201]:
                         get_deliveries.clear()
                         st.success(f"✅ {len(new_rows)} תעודות נוספו!")
@@ -2305,11 +2309,10 @@ with tab8:
             if new_lat and new_lon:
                 if st.button("💾 שמור מיקום חדש", key="fix_save", type="primary", use_container_width=True):
                     # עדכן GitHub
-                    import base64
                     api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/stores.csv"
                     gh_headers = {"Authorization": f"token {GITHUB_TOKEN}",
                                   "Accept": "application/vnd.github.v3+json"}
-                    r = requests.get(api, headers=gh_headers)
+                    r = requests.get(api, headers=gh_headers, timeout=15)
                     data = r.json()
                     sha  = data.get("sha", "")
                     content_b64 = data.get("content", "")
@@ -2341,7 +2344,7 @@ with tab8:
                             "content": new_content,
                             "sha": sha,
                         }
-                        res = requests.put(api, headers=gh_headers, json=payload)
+                        res = requests.put(api, headers=gh_headers, json=payload, timeout=15)
                         if res.status_code in (200, 201):
                             st.success(f"✅ מיקום עודכן! {chosen['name']} → {new_lat}, {new_lon}")
                             # נקה GPS session state

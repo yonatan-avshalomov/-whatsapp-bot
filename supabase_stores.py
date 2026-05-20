@@ -388,14 +388,12 @@ def cleanup_senzey_csv_local(csv_path: str = "senzey_data.csv",
     Task 4 (גרסת CSV): מנקה senzey_data.csv המקומי מכפילויות ורשומות ישנות.
     שימושי לפני migration ולתחזוקת הקובץ.
     """
-    from datetime import datetime
     cutoff   = datetime.now() - timedelta(days=months_back * 30)
     seen_ids = {}
     skipped  = 0
 
     with open(csv_path, encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
-        fields = f.name  # שם לרישום בלבד
 
     original_count = len(rows)
 

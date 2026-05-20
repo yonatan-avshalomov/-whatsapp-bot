@@ -13,6 +13,7 @@ gps_component.py
 
 import streamlit as st
 import streamlit.components.v1 as components
+from datetime import datetime, timezone
 
 
 # ── קומפוננטת GPS ──────────────────────────────────────────────────────────
@@ -186,7 +187,7 @@ def save_store_location(store_name: str, city: str,
         result = (
             supabase_db.client
             .table("stores")
-            .update({"lat": lat, "lon": lon, "updated_at": "now()"})
+            .update({"lat": lat, "lon": lon, "updated_at": datetime.now(timezone.utc).isoformat()})
             .eq("name", store_name)
             .eq("city", city)
             .execute()
