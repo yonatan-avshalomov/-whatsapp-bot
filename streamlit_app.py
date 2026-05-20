@@ -311,8 +311,16 @@ def get_stores():
     return stores
 
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=300)
 def get_deliveries():
+    """תעודות סנזי — Supabase ראשון (real-time), GitHub CSV כגיבוי."""
+    try:
+        rows = supabase_db.get_deliveries(months_back=3)
+        if rows:
+            return rows
+    except Exception:
+        pass
+    # GitHub CSV fallback
     try:
         url = "https://raw.githubusercontent.com/yonatan-avshalomov/-whatsapp-bot/main/senzey_data.csv"
         r = requests.get(url, timeout=10)

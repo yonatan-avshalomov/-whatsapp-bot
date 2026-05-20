@@ -256,6 +256,48 @@ def full_scrape(months_back=2, filename="senzey_data.csv"):
     print(f"✅ סריקה ראשונית הושלמה: {len(results)} תעודות", flush=True)
 
 
+def push_to_supabase(records: list[dict]) -> None:
+    """דוחף רשומות חדשות ל-Supabase senzey_deliveries (best-effort)."""
+    if not records:
+        return
+    try:
+        import os
+        from supabase import create_client
+        url = os.getenv("SUPABASE_URL", "")
+        key = os.getenv("SUPABASE_ANON_KEY", "")
+        if not url or not key:
+            print("⚠️ SUPABASE_URL/SUPABASE_ANON_KEY לא מוגדרים — דילוג על Supabase push", flush=True)
+            return
+        client = create_client(url, key)
+        batch_size = 100
+        ok = 0
+        for i in range(0, len(records), batch_size):
+            batch = []
+            for r in records[i:i+batch_size]:
+                rid = r.get("id")
+                try:
+                    rid = int(rid)
+                except (ValueError, TypeError):
+                    continue
+                batch.append({
+                    "id":       rid,
+                    "date":     r.get("date", ""),
+                    "customer": r.get("customer", ""),
+                    "branch":   r.get("branch", ""),
+                })
+            if batch:
+                try:
+                    client.table("senzey_deliveries").upsert(
+                        batch, on_conflict="id"
+                    ).execute()
+                    ok += len(batch)
+                except Exception as e:
+                    print(f"⚠️ Supabase batch error: {e}", flush=True)
+        print(f"✅ Supabase: {ok}/{len(records)} תעודות עודכנו", flush=True)
+    except Exception as e:
+        print(f"⚠️ Supabase push failed: {e}", flush=True)
+
+
 if __name__ == "__main__":
     import sys
     filename = "senzey_data.csv"
@@ -263,15 +305,23 @@ if __name__ == "__main__":
     if "--full" in sys.argv:
         # First time: scrape everything
         full_scrape(months_back=2, filename=filename)
+        # Push all records to Supabase
+        with open(filename, encoding="utf-8-sig") as f:
+            all_records = list(csv.DictReader(f))
+        push_to_supabase(all_records)
     else:
         # Daily: only new records
         last_id = get_last_known_id(filename)
         if last_id == 0:
             print("אין CSV קיים — מריץ סריקה ראשונית...", flush=True)
             full_scrape(months_back=2, filename=filename)
+            with open(filename, encoding="utf-8-sig") as f:
+                all_records = list(csv.DictReader(f))
+            push_to_supabase(all_records)
         else:
             new_records = scrape_new_deliveries(last_known_id=last_id)
             if new_records:
                 update_csv(new_records, filename)
+                push_to_supabase(new_records)
             else:
                 print("✅ אין תעודות חדשות מאז הסריקה האחרונה.", flush=True)

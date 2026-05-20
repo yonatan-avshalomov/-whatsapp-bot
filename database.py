@@ -227,6 +227,67 @@ class StoreDatabase:
             print(f"[DB] delete_alias error: {e}")
             return False
 
+    # ══════════════════════════════════════
+    # Senzey Deliveries
+    # ══════════════════════════════════════
+
+    def get_deliveries(self, months_back: int = 3) -> list[dict]:
+        """תעודות סנזי מ-Supabase — מוגבל ל-N חודשים אחרונים."""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=months_back * 30)).strftime("%d/%m/%y")
+        try:
+            res = (self.client.table("senzey_deliveries")
+                   .select("id,date,customer,branch")
+                   .order("id", desc=True)
+                   .limit(2000)
+                   .execute())
+            return [{"id": str(r["id"]), "date": r["date"] or "",
+                     "customer": r["customer"] or "", "branch": r["branch"] or ""}
+                    for r in (res.data or [])]
+        except Exception as e:
+            print(f"[DB] get_deliveries error: {e}")
+            return []
+
+    def push_deliveries(self, records: list[dict]) -> int:
+        """
+        מוסיף תעודות חדשות ל-Supabase (upsert לפי id).
+        מחזיר כמה נוספו בהצלחה.
+        """
+        ok = 0
+        batch = []
+        for r in records:
+            rid = r.get("id")
+            if not rid:
+                continue
+            try:
+                rid = int(rid)
+            except (ValueError, TypeError):
+                continue
+            batch.append({
+                "id":       rid,
+                "date":     r.get("date", ""),
+                "customer": r.get("customer", ""),
+                "branch":   r.get("branch", ""),
+            })
+            if len(batch) == 100:
+                try:
+                    self.client.table("senzey_deliveries").upsert(
+                        batch, on_conflict="id"
+                    ).execute()
+                    ok += len(batch)
+                except Exception as e:
+                    print(f"[DB] push_deliveries batch error: {e}")
+                batch = []
+        if batch:
+            try:
+                self.client.table("senzey_deliveries").upsert(
+                    batch, on_conflict="id"
+                ).execute()
+                ok += len(batch)
+            except Exception as e:
+                print(f"[DB] push_deliveries batch error: {e}")
+        return ok
+
     def is_connected(self) -> bool:
         """בדיקת חיבור לDB."""
         try:
