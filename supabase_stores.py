@@ -90,10 +90,14 @@ MONTHS_BACK = 3   # כמה חודשים אחורה לטעון תעודות סנ�
 def _get_supabase():
     """מחזיר Supabase client עם ה-credentials מה-environment."""
     from supabase import create_client
-    url = (st.secrets.get("SUPABASE_URL")  if hasattr(st, "secrets") else None) \
-          or os.getenv("SUPABASE_URL", "")
-    key = (st.secrets.get("SUPABASE_ANON_KEY") if hasattr(st, "secrets") else None) \
-          or os.getenv("SUPABASE_ANON_KEY", "")
+    url = key = ""
+    try:
+        url = st.secrets.get("SUPABASE_URL", "") or ""
+        key = st.secrets.get("SUPABASE_ANON_KEY", "") or ""
+    except Exception:
+        pass
+    url = url or os.getenv("SUPABASE_URL", "")
+    key = key or os.getenv("SUPABASE_ANON_KEY", "")
     if not url or not key:
         raise RuntimeError("SUPABASE_URL / SUPABASE_ANON_KEY לא מוגדרים")
     return create_client(url, key)
@@ -321,7 +325,7 @@ def migrate_senzey_csv_to_supabase(csv_path: str = "senzey_data.csv",
 
         batch.append({
             "id":       rid,
-            "date_str": date_str,
+            "date":     date_str,
             "customer": row.get("customer", ""),
             "branch":   row.get("branch",   ""),
         })
