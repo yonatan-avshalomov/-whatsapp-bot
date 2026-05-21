@@ -10,3 +10,4 @@ qrcode[pil]
 openpyxl
 openai
 beautifulsoup4
+python-telegram-bot
