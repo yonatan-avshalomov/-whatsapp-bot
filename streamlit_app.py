@@ -374,15 +374,27 @@ def get_aliases() -> dict:
 
 
 def get_visit_stats_cached() -> dict:
-    """מחשב סטטיסטיקות ביקורים עם cache ב-session_state — מוקפא 5 דקות.
-    משתמש ב-session_state במקום @st.cache_data כדי להימנע מ-nested cache warning."""
+    """
+    מחשב סטטיסטיקות ביקורים עם cache ב-session_state — מוקפא 5 דקות.
+
+    סדר עדיפות:
+      1. Supabase visit_stats_view  — חישוב SQL (מהיר, ללא Python math)
+      2. Python get_all_visit_stats — fallback אם ה-View לא קיים/נכשל
+    """
     _KEY, _TS, _TTL = "_vs_result", "_vs_ts", 300
     if (st.session_state.get(_KEY) is not None and
             time.time() - st.session_state.get(_TS, 0) < _TTL):
         return st.session_state[_KEY]
-    result = get_all_visit_stats(
-        get_stores(), get_deliveries(), get_manual_visits(), aliases=get_aliases()
-    )
+
+    # ── נסה Supabase view קודם ──
+    result = supabase_db.get_visit_stats_from_view()
+
+    # ── fallback: Python computation ──
+    if not result:
+        result = get_all_visit_stats(
+            get_stores(), get_deliveries(), get_manual_visits(), aliases=get_aliases()
+        )
+
     st.session_state[_KEY] = result
     st.session_state[_TS]  = time.time()
     return result
@@ -2276,3 +2288,137 @@ with tab7:
 
     except Exception as e:
         st.error(f"שגיאה בטעינת מפת תיקון מיקום: {e}")
+
+    # ════════════════════════════════════════════════════
+    # Task 7 — ביקורת מיקומים + גיאוקודינג אוטומטי
+    # ════════════════════════════════════════════════════
+    st.divider()
+    st.subheader("🔍 ביקורת מיקומים — גיאוקודינג אוטומטי")
+    st.caption(
+        "סורק את הטבלה ומאתר חנויות עם קואורדינטות חסרות. "
+        "מגאוקד אוטומטית עם Google Places API ומעדכן את Supabase."
+    )
+
+    col_audit1, col_audit2 = st.columns([2, 1])
+
+    with col_audit1:
+        if st.button("🔍 סרוק חנויות חסרות מיקום", key="audit_scan", type="secondary"):
+            with st.spinner("סורק Supabase..."):
+                missing = supabase_db.get_stores_missing_coords()
+            if not missing:
+                st.success("✅ כל החנויות כבר מגאוקדות!")
+            else:
+                st.session_state["audit_missing"] = missing
+                st.session_state["audit_exceptions"] = []
+
+    with col_audit2:
+        if st.session_state.get("audit_missing"):
+            st.metric("חנויות חסרות מיקום",
+                      len(st.session_state["audit_missing"]))
+
+    # ── הצג חנויות חסרות + כפתור גיאוקודינג ──────────────
+    if st.session_state.get("audit_missing"):
+        missing_list = st.session_state["audit_missing"]
+
+        with st.expander(f"📋 {len(missing_list)} חנויות חסרות מיקום", expanded=True):
+            for s in missing_list[:30]:
+                st.markdown(
+                    f"- **{s.get('name','')}** | {s.get('city','')} | "
+                    f"`{s.get('address','') or 'אין כתובת'}`"
+                )
+            if len(missing_list) > 30:
+                st.caption(f"ועוד {len(missing_list) - 30} חנויות...")
+
+        if not GOOGLE_MAPS_API_KEY:
+            st.warning("⚠️ GOOGLE_MAPS_API_KEY לא מוגדר — לא ניתן לגאוקד אוטומטית")
+        else:
+            if st.button("🚀 גאוקד הכל אוטומטית", key="audit_geocode", type="primary"):
+                try:
+                    from geocoder import geocode_store
+
+                    updated_ok   = []
+                    exceptions   = []
+                    progress_bar = st.progress(0, text="מגאוקד...")
+
+                    # העבר API key לסביבה
+                    os.environ["GOOGLE_MAPS_API_KEY"] = GOOGLE_MAPS_API_KEY
+
+                    for i, store in enumerate(missing_list):
+                        progress_bar.progress(
+                            (i + 1) / len(missing_list),
+                            text=f"מגאוקד {i+1}/{len(missing_list)}: {store.get('name','')}"
+                        )
+
+                        result = geocode_store(
+                            name    = store.get("name", ""),
+                            address = store.get("address", ""),
+                            city    = store.get("city", ""),
+                        )
+
+                        if result and result.get("lat") and result.get("lon"):
+                            ok = supabase_db.update_store_coords(
+                                store_id          = store["id"],
+                                lat               = result["lat"],
+                                lon               = result["lon"],
+                                formatted_address = result.get("formatted_address", ""),
+                            )
+                            if ok:
+                                updated_ok.append({
+                                    "name":    store.get("name", ""),
+                                    "city":    store.get("city", ""),
+                                    "lat":     result["lat"],
+                                    "lon":     result["lon"],
+                                    "source":  result.get("source", ""),
+                                    "address": result.get("formatted_address", ""),
+                                })
+                            else:
+                                exceptions.append({
+                                    "name":   store.get("name", ""),
+                                    "city":   store.get("city", ""),
+                                    "reason": "שגיאה בעדכון Supabase",
+                                })
+                        else:
+                            exceptions.append({
+                                "name":   store.get("name", ""),
+                                "city":   store.get("city", ""),
+                                "reason": "לא נמצאו קואורדינטות",
+                            })
+
+                    progress_bar.empty()
+
+                    # נקה cache
+                    get_stores.clear()
+                    st.session_state.pop("audit_missing", None)
+
+                    # שמור exceptions ל-session state
+                    st.session_state["audit_exceptions"] = exceptions
+
+                    st.success(
+                        f"✅ גיאוקודינג הושלם!\n\n"
+                        f"- עודכנו בהצלחה: **{len(updated_ok)}** חנויות\n"
+                        f"- חנויות שלא נמצאו: **{len(exceptions)}**"
+                    )
+
+                    if updated_ok:
+                        st.dataframe(
+                            [{"שם": r["name"], "עיר": r["city"],
+                              "lat": r["lat"], "lon": r["lon"],
+                              "מקור": r["source"]}
+                             for r in updated_ok],
+                            use_container_width=True
+                        )
+
+                except Exception as _geo_err:
+                    st.error(f"❌ שגיאה בגיאוקודינג: {_geo_err}")
+
+    # ── Exceptions Report ─────────────────────────────────
+    if st.session_state.get("audit_exceptions"):
+        exceptions = st.session_state["audit_exceptions"]
+        st.divider()
+        st.subheader(f"⚠️ דוח חריגים — {len(exceptions)} חנויות שלא גאוקדו")
+        st.caption("אלו חנויות שה-API לא הצליח לאתר — יש לתקן ידנית דרך המפה למעלה.")
+
+        for exc in exceptions:
+            st.markdown(
+                f"❌ **{exc['name']}** | {exc['city']} — *{exc['reason']}*"
+            )

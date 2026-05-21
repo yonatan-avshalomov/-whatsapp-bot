@@ -70,6 +70,93 @@ SQL ליצירת הטבלאות — הרץ פעם אחת ב-Supabase SQL Editor:
     $$;
 
 ─────────────────────────────────────────────────────────
+
+SQL ל-Task 6: visit_stats_view — הרץ ב-Supabase SQL Editor:
+─────────────────────────────────────────────────────────
+
+    -- פונקציה: ממיר תאריך ישראלי (DD/MM/YY HH:MI) ל-timestamptz
+    CREATE OR REPLACE FUNCTION parse_il_date(dt_str text)
+    RETURNS timestamptz
+    LANGUAGE plpgsql IMMUTABLE AS $$
+    BEGIN
+      IF dt_str IS NULL OR trim(dt_str) = '' THEN RETURN NULL; END IF;
+      IF dt_str ~ '^\d{1,2}/\d{1,2}/\d{2} \d{2}:\d{2}' THEN
+        RETURN to_timestamp(trim(dt_str), 'DD/MM/YY HH24:MI');
+      END IF;
+      IF dt_str ~ '^\d{1,2}/\d{1,2}/\d{4} \d{2}:\d{2}' THEN
+        RETURN to_timestamp(trim(dt_str), 'DD/MM/YYYY HH24:MI');
+      END IF;
+      IF dt_str ~ '^\d{1,2}/\d{1,2}/\d{2}$' THEN
+        RETURN to_timestamp(trim(dt_str), 'DD/MM/YY');
+      END IF;
+      IF dt_str ~ '^\d{1,2}/\d{1,2}/\d{4}$' THEN
+        RETURN to_timestamp(trim(dt_str), 'DD/MM/YYYY');
+      END IF;
+      RETURN NULL;
+    EXCEPTION WHEN others THEN RETURN NULL;
+    END;
+    $$;
+
+    -- View: סטטיסטיקות ביקורים לכל חנות
+    -- מחבר: stores + manual_visits (ישיר) + senzey_deliveries (דרך store_aliases)
+    CREATE OR REPLACE VIEW visit_stats_view AS
+    WITH
+    -- ביקורים ידניים — שם החנות ישיר
+    manual_v AS (
+      SELECT store          AS store_name,
+             parse_il_date(date) AS visit_dt
+      FROM   manual_visits
+      WHERE  date IS NOT NULL AND date <> ''
+    ),
+    -- תעודות משלוח — רק מה שכבר אושר ב-store_aliases
+    delivery_v AS (
+      SELECT sa.store_name,
+             parse_il_date(sd.date) AS visit_dt
+      FROM   senzey_deliveries sd
+      JOIN   store_aliases sa
+        ON   sa.branch_norm = lower(trim(sd.branch))
+          OR sa.branch_norm = sd.branch
+      WHERE  sd.date IS NOT NULL AND sd.date <> ''
+    ),
+    -- כל הביקורים ביחד
+    all_v AS (
+      SELECT store_name, visit_dt FROM manual_v   WHERE visit_dt IS NOT NULL
+      UNION ALL
+      SELECT store_name, visit_dt FROM delivery_v WHERE visit_dt IS NOT NULL
+    ),
+    -- אגרגציה: ביקור אחרון + ספירה
+    agg AS (
+      SELECT store_name,
+             MAX(visit_dt)  AS last_visit_dt,
+             COUNT(*)::int  AS visit_count
+      FROM   all_v
+      GROUP  BY store_name
+    )
+    SELECT
+      s.name,
+      s.city,
+      s.chain,
+      s.lat::float,
+      s.lon::float,
+      agg.last_visit_dt,
+      TO_CHAR(agg.last_visit_dt AT TIME ZONE 'Asia/Jerusalem', 'DD/MM/YY') AS last_date_str,
+      agg.visit_count,
+      CASE
+        WHEN agg.last_visit_dt IS NULL THEN NULL
+        ELSE EXTRACT(
+          DAY FROM (
+            NOW() AT TIME ZONE 'Asia/Jerusalem'
+            - agg.last_visit_dt AT TIME ZONE 'Asia/Jerusalem'
+          )
+        )::int
+      END AS days_since
+    FROM stores s
+    LEFT JOIN agg ON agg.store_name = s.name;
+
+    -- הרשאות קריאה ל-anon
+    GRANT SELECT ON visit_stats_view TO anon;
+
+─────────────────────────────────────────────────────────
 """
 
 import os

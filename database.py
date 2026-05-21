@@ -16,7 +16,7 @@ database.py
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -287,6 +287,72 @@ class StoreDatabase:
             except Exception as e:
                 print(f"[DB] push_deliveries batch error: {e}")
         return ok
+
+    def get_visit_stats_from_view(self) -> dict | None:
+        """
+        קורא סטטיסטיקות ביקורים מ-visit_stats_view ב-Supabase.
+
+        מחזיר dict בפורמט זהה ל-get_all_visit_stats():
+          { store_name: {last_date_str, days_since, visit_count, source} }
+
+        מחזיר None אם ה-view לא קיים או שיש שגיאה.
+        """
+        try:
+            res = self.client.table("visit_stats_view").select("*").execute()
+            if not res.data:
+                return None
+            result = {}
+            for row in res.data:
+                name = row.get("name", "")
+                if not name:
+                    continue
+                days = row.get("days_since")
+                result[name] = {
+                    "last_date_str": row.get("last_date_str") or "—",
+                    "days_since":    int(days) if days is not None else None,
+                    "visit_count":   int(row.get("visit_count") or 0),
+                    "source":        "db_view",
+                    "visits":        [],  # היסטוריה מפורטת אינה נשמרת בView
+                    "last_date":     None,
+                }
+            return result if result else None
+        except Exception as e:
+            print(f"[DB] get_visit_stats_from_view error: {e}")
+            return None
+
+    def get_stores_missing_coords(self) -> list[dict]:
+        """
+        מחזיר רשימת חנויות שחסרות קואורדינטות (lat/lon) או שהן NULL.
+        משמש ל-Task 7: Location Audit.
+        """
+        try:
+            res = (self.client.table("stores")
+                   .select("id,name,city,chain,address,lat,lon")
+                   .or_("lat.is.null,lon.is.null")
+                   .order("chain", desc=False)
+                   .execute())
+            return res.data or []
+        except Exception as e:
+            print(f"[DB] get_stores_missing_coords error: {e}")
+            return []
+
+    def update_store_coords(self, store_id: int,
+                            lat: float, lon: float,
+                            formatted_address: str = "") -> bool:
+        """מעדכן lat/lon (ואופציונלית כתובת מנורמלת) לחנות לפי id."""
+        try:
+            payload = {
+                "lat": lat,
+                "lon": lon,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if formatted_address:
+                payload["address"] = formatted_address
+            self.client.table("stores").update(payload).eq("id", store_id).execute()
+            return True
+        except Exception as e:
+            print(f"[DB] update_store_coords error: {e}")
+            return False
 
     def is_connected(self) -> bool:
         """בדיקת חיבור לDB."""
