@@ -2234,55 +2234,126 @@ with tab7:
                 st.success(f"📍 נבחר מיקום מהמפה: **{new_lat}, {new_lon}**")
 
             if new_lat and new_lon:
-                if st.button("💾 שמור מיקום חדש", key="fix_save", type="primary", use_container_width=True):
-                    # עדכן GitHub
-                    api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/stores.csv"
-                    gh_headers = {"Authorization": f"token {GITHUB_TOKEN}",
-                                  "Accept": "application/vnd.github.v3+json"}
-                    r = requests.get(api, headers=gh_headers, timeout=15)
-                    data = r.json()
-                    sha  = data.get("sha", "")
-                    content_b64 = data.get("content", "")
-                    csv_text = base64.b64decode(content_b64).decode("utf-8-sig")
+                # ── Reverse Geocoding — כתובת מיידית ────────
+                rg_key = f"_rg_{new_lat}_{new_lon}"
+                if st.session_state.get(rg_key) is None:
+                    with st.spinner("🔍 מאחזר כתובת..."):
+                        fetched_address = ""
+                        try:
+                            if GOOGLE_MAPS_API_KEY:
+                                os.environ["GOOGLE_MAPS_API_KEY"] = GOOGLE_MAPS_API_KEY
+                                rg_url = "https://maps.googleapis.com/maps/api/geocode/json"
+                                rg_params = {
+                                    "latlng":   f"{new_lat},{new_lon}",
+                                    "language": "he",
+                                    "region":   "il",
+                                    "key":      GOOGLE_MAPS_API_KEY,
+                                }
+                                rg_resp = requests.get(rg_url, params=rg_params, timeout=10)
+                                rg_data = rg_resp.json()
+                                if rg_data.get("status") == "OK" and rg_data.get("results"):
+                                    fetched_address = rg_data["results"][0].get(
+                                        "formatted_address", ""
+                                    )
+                        except Exception:
+                            pass
+                    st.session_state[rg_key] = fetched_address
 
-                    reader = csv.DictReader(io.StringIO(csv_text))
-                    rows   = list(reader)
-                    fields = reader.fieldnames or list(rows[0].keys())
+                fetched_address = st.session_state.get(rg_key, "")
 
-                    updated = False
-                    for row in rows:
-                        if row["name"] == chosen["name"] and row["city"] == chosen.get("city",""):
-                            row["lat"] = str(new_lat)
-                            row["lon"] = str(new_lon)
-                            updated = True
-                            break
+                # הצג כתובת שנמצאה
+                if fetched_address:
+                    st.info(f"📮 כתובת שנמצאה: **{fetched_address}**")
+                else:
+                    st.warning("⚠️ לא נמצאה כתובת — הקואורדינטות יישמרו ללא כתובת")
 
-                    if updated:
-                        out = io.StringIO()
-                        w = csv.DictWriter(out, fieldnames=fields)
-                        w.writeheader()
-                        w.writerows(rows)
-                        new_content = base64.b64encode(
-                            out.getvalue().encode("utf-8-sig")
-                        ).decode()
+                # אפשר עריכה ידנית של הכתובת
+                final_address = st.text_input(
+                    "כתובת (ניתן לערוך)",
+                    value=fetched_address,
+                    key=f"fix_addr_{new_lat}_{new_lon}",
+                    placeholder="רחוב, מספר, עיר"
+                )
 
-                        payload = {
-                            "message": f"Fix location: {chosen['name']} -> {new_lat},{new_lon}",
-                            "content": new_content,
-                            "sha": sha,
-                        }
-                        res = requests.put(api, headers=gh_headers, json=payload, timeout=15)
-                        if res.status_code in (200, 201):
-                            st.success(f"✅ מיקום עודכן! {chosen['name']} → {new_lat}, {new_lon}")
-                            # נקה GPS session state
-                            st.session_state.pop("gps_lat", None)
-                            st.session_state.pop("gps_lon", None)
-                            get_stores.clear()
-                            st.balloons()
-                        else:
-                            st.error(f"❌ שגיאה: {res.status_code}")
+                if st.button("💾 שמור מיקום + כתובת", key="fix_save", type="primary",
+                             use_container_width=True):
+                    errors = []
+
+                    # ── 1. עדכן Supabase ──────────────────────
+                    store_id = chosen.get("id")
+                    if store_id:
+                        ok_db = supabase_db.update_store_coords(
+                            store_id=int(store_id),
+                            lat=new_lat,
+                            lon=new_lon,
+                            formatted_address=final_address,
+                        )
+                        if not ok_db:
+                            errors.append("Supabase")
                     else:
-                        st.error("לא נמצאה החנות ב-CSV")
+                        errors.append("Supabase (אין store id)")
+
+                    # ── 2. עדכן GitHub CSV ────────────────────
+                    if GITHUB_TOKEN:
+                        try:
+                            api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/stores.csv"
+                            gh_headers = {"Authorization": f"token {GITHUB_TOKEN}",
+                                          "Accept": "application/vnd.github.v3+json"}
+                            r = requests.get(api, headers=gh_headers, timeout=15)
+                            data = r.json()
+                            sha  = data.get("sha", "")
+                            csv_text = base64.b64decode(
+                                data.get("content", "")
+                            ).decode("utf-8-sig")
+
+                            reader = csv.DictReader(io.StringIO(csv_text))
+                            rows   = list(reader)
+                            fields = reader.fieldnames or list(rows[0].keys())
+
+                            for row in rows:
+                                if (row["name"] == chosen["name"] and
+                                        row.get("city") == chosen.get("city", "")):
+                                    row["lat"]     = str(new_lat)
+                                    row["lon"]     = str(new_lon)
+                                    if "address" in fields:
+                                        row["address"] = final_address
+                                    break
+
+                            out = io.StringIO()
+                            w = csv.DictWriter(out, fieldnames=fields)
+                            w.writeheader()
+                            w.writerows(rows)
+                            new_content = base64.b64encode(
+                                out.getvalue().encode("utf-8-sig")
+                            ).decode()
+                            payload = {
+                                "message": (f"Fix location: {chosen['name']} "
+                                            f"→ {new_lat},{new_lon}"),
+                                "content": new_content,
+                                "sha":     sha,
+                            }
+                            res = requests.put(api, headers=gh_headers,
+                                               json=payload, timeout=15)
+                            if res.status_code not in (200, 201):
+                                errors.append(f"GitHub ({res.status_code})")
+                        except Exception as _gh_err:
+                            errors.append(f"GitHub ({_gh_err})")
+
+                    # ── תוצאה ────────────────────────────────
+                    if not errors:
+                        st.success(
+                            f"✅ עודכן בהצלחה!\n\n"
+                            f"📍 **{chosen['name']}**\n"
+                            f"🗺️ `{new_lat}, {new_lon}`\n"
+                            f"📮 {final_address or '—'}"
+                        )
+                        st.session_state.pop("gps_lat", None)
+                        st.session_state.pop("gps_lon", None)
+                        st.session_state.pop(rg_key, None)
+                        get_stores.clear()
+                        st.balloons()
+                    else:
+                        st.error(f"❌ שגיאה בעדכון: {', '.join(errors)}")
             else:
                 st.caption("⬆️ לחץ על המפה או השתמש ב-GPS מהנייד")
 
