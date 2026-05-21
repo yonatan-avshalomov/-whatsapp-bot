@@ -10,10 +10,8 @@ import base64
 import time
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
-import openai as _openai_mod
-import anthropic as _ant_mod
 from visit_tracker import get_all_visit_stats, urgency_label, urgency_color_hex, get_overdue_stores, get_never_visited, get_unmatched_branches
-from route_planner import optimize_route, build_gmaps_url, build_waze_url, build_qr_code, total_distance, filter_stores
+# openai ו-anthropic נטענים בזמן שימוש (lazy) כדי לא להאט את ה-startup
 from database import db as supabase_db
 from kml_exporter import build_kml, build_kml_filename
 
@@ -1118,9 +1116,9 @@ _deliveries = get_deliveries()
 _notes      = get_notes()
 _visits     = get_manual_visits()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "💬 שיחה", "📝 הערה", "📊 היום", "🗺️ מפה",
-    "➕ חנות", "📅 ביקורים", "🧭 מסלול", "📍 מיקום"
+    "➕ חנות", "📅 ביקורים", "📍 מיקום"
 ])
 
 
@@ -1227,6 +1225,7 @@ with tab2:
         if voice_file is not None:
             with st.spinner("🎙️ מתמלל הקלטה..."):
                 try:
+                    import openai as _openai_mod   # lazy — נטען רק בעת שימוש
                     _oa_client = _openai_mod.OpenAI(api_key=OPENAI_API_KEY)
                     audio_bytes = voice_file.read()
                     # Whisper API requires a file-like object with a name
@@ -1242,6 +1241,7 @@ with tab2:
 
                     # ── Claude: חלץ חנות + הערה ──
                     with st.spinner("🤖 מזהה חנות..."):
+                        import anthropic as _ant_mod  # lazy — נטען רק בעת שימוש
                         _ant_client = _ant_mod.Anthropic(api_key=ANTHROPIC_API_KEY)
                         store_list_short = "\n".join(
                             f"- {s['name']} ({s.get('city','')})"
@@ -1573,7 +1573,10 @@ def build_store_map_html() -> str:
 <head>
   <meta charset="utf-8">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
   <style>
     body,html{{margin:0;padding:0;font-family:Arial,sans-serif}}
     #map{{width:100%;height:560px}}
@@ -1594,6 +1597,22 @@ L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',
 
 let allMarkers=[], curFilter='all';
 
+// MarkerCluster — מקבץ סמנים קרובים ומונע עומס DOM
+const cluster = L.markerClusterGroup({{
+  maxClusterRadius: 60,
+  disableClusteringAtZoom: 13,
+  iconCreateFunction: function(c) {{
+    const n = c.getChildCount();
+    return L.divIcon({{
+      html: `<div style="background:#1F4E79;color:white;border-radius:50%;
+             width:34px;height:34px;display:flex;align-items:center;
+             justify-content:center;font-weight:bold;font-size:12px;
+             box-shadow:0 2px 6px rgba(0,0,0,.4)">${{n}}</div>`,
+      iconSize:[34,34], iconAnchor:[17,17]
+    }});
+  }}
+}});
+
 function buildIcon(fill,ring){{
   return L.divIcon({{
     className:'',
@@ -1613,14 +1632,15 @@ DATA.forEach(m=>{{
   mk.bindPopup(popup);
   mk._chain = m.chain;
   allMarkers.push(mk);
-  mk.addTo(map);
+  cluster.addLayer(mk);
 }});
+map.addLayer(cluster);
 
 function filterChain(chain){{
   curFilter = chain;
+  cluster.clearLayers();
   allMarkers.forEach(mk=>{{
-    const show = (chain==='all') || mk._chain.includes(chain);
-    if(show) mk.addTo(map); else map.removeLayer(mk);
+    if(chain==='all' || mk._chain.includes(chain)) cluster.addLayer(mk);
   }});
   document.querySelectorAll('.filter-btn').forEach(b=>
     b.style.fontWeight = b.dataset.chain===chain?'bold':'normal');
@@ -2112,123 +2132,10 @@ with tab6:
 
 
 # ════════════════════════════════════════════════════
-# לשונית 7 — מסלול יומי (Rule B Action 2)
-# ════════════════════════════════════════════════════
+# ════════════════════════════════════════════
+# לשונית 7 — תקן מיקום (Rule A)
+# ════════════════════════════════════════════
 with tab7:
-    st.subheader("🧭 תכנון מסלול יומי")
-
-    route_stores = _stores
-
-    # ── סינון ראשוני ───────────────────────────────
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-        all_chains = sorted(set(s.get("chain","") or "פרטי" for s in route_stores))
-        sel_chains = st.multiselect("סנן לפי רשת", all_chains,
-                                     default=[], key="route_chains")
-    with col_f2:
-        all_cities = sorted(set(s.get("city","") for s in route_stores if s.get("city")))
-        sel_cities = st.multiselect("סנן לפי עיר", all_cities,
-                                     default=[], key="route_cities")
-
-    # החל סינון
-    filtered = filter_stores(
-        route_stores,
-        cities=sel_cities  if sel_cities  else None,
-        chains=sel_chains  if sel_chains  else None
-    )
-
-    # ── בחירת חנויות ────────────────────────────────
-    st.caption(f"{len(filtered)} חנויות זמינות לאחר סינון")
-    store_options = [f"{s['name']} ({s.get('city','')})" for s in filtered]
-    store_map     = {f"{s['name']} ({s.get('city','')})": s for s in filtered}
-
-    selected_labels = st.multiselect(
-        "בחר חנויות למסלול",
-        options=store_options,
-        default=[],
-        key="route_selection",
-        help="בחר 2-23 חנויות (מגבלת Google Maps)"
-    )
-    selected_stops = [store_map[lbl] for lbl in selected_labels if lbl in store_map]
-
-    # ── נקודת התחלה ─────────────────────────────────
-    st.divider()
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        start_name = st.text_input("נקודת התחלה", value="הוד השרון", key="route_start")
-    with col_s2:
-        start_lat  = st.number_input("Lat", value=32.150, format="%.4f", key="route_lat")
-    with col_s3:
-        start_lon  = st.number_input("Lon", value=34.893, format="%.4f", key="route_lon")
-
-    travel_mode = st.radio("אמצעי תחבורה", ["🚗 נהיגה", "🚶 הליכה"], horizontal=True)
-    mode_str = "driving" if "נהיגה" in travel_mode else "walking"
-
-    # ── חשב מסלול ───────────────────────────────────
-    if len(selected_stops) < 2:
-        st.info("בחר לפחות 2 חנויות כדי לחשב מסלול.")
-    else:
-        if len(selected_stops) > 23:
-            st.warning("⚠️ Google Maps תומך במקסימום 23 ציונים. נבחרו 23 הראשונות.")
-            selected_stops = selected_stops[:23]
-
-        with st.spinner("מחשב מסלול אופטימלי..."):
-            route = optimize_route(selected_stops, start_lat, start_lon)
-            total_km = total_distance(route)
-            gmaps_url = build_gmaps_url(route, start_lat, start_lon, mode_str)
-            waze_url  = build_waze_url(route)
-
-        # ── סיכום מסלול ─────────────────────────────
-        st.success(f"✅ מסלול מיטבי — {len(route)} עצירות | סה\"כ ~{total_km:.0f} ק\"מ")
-
-        # טבלת עצירות
-        st.subheader("📋 סדר הביקורים")
-        for i, s in enumerate(route, 1):
-            chain = s.get("chain","")
-            chain_icon = "🔵" if "שילב" in chain else "🟢" if "מכבי" in chain else "🟠" if "ניצת" in chain else "⚫"
-            col_a, col_b, col_c = st.columns([1, 5, 2])
-            col_a.markdown(f"**{i}**")
-            col_b.markdown(f"{chain_icon} **{s['name']}** — {s.get('city','')}")
-            col_c.markdown(f"📏 {s.get('leg_km',0)} ק\"מ")
-
-        st.divider()
-
-        # ── כפתורי ניווט ────────────────────────────
-        st.subheader("📱 פתח לניווט")
-        col_g, col_w = st.columns(2)
-        with col_g:
-            st.link_button("🗺️ פתח ב-Google Maps",
-                            gmaps_url,
-                            use_container_width=True,
-                            type="primary")
-        with col_w:
-            if waze_url:
-                st.link_button("🔵 נווט ב-Waze (עצירה ראשונה)",
-                                waze_url,
-                                use_container_width=True)
-
-        # ── QR Code לסריקה מהנייד ───────────────────
-        st.divider()
-        st.subheader("📲 סרוק מהטלפון")
-        st.caption("סרוק את ה-QR Code כדי לפתוח את המסלול ישירות בנייד שלך")
-
-        qr_buf = build_qr_code(gmaps_url)
-        if qr_buf:
-            col_qr, col_url = st.columns([1, 2])
-            with col_qr:
-                st.image(qr_buf, width=200)
-            with col_url:
-                st.text_area("קישור Google Maps", gmaps_url, height=120, key="route_url_display")
-                if st.button("📋 העתק קישור", key="copy_url"):
-                    st.toast("✅ הקישור מוכן — העתק מהתיבה למעלה")
-        else:
-            st.text_area("קישור Google Maps", gmaps_url, height=100, key="route_url_display2")
-
-
-# ════════════════════════════════════════════
-# לשונית 8 — תקן מיקום (Rule A)
-# ════════════════════════════════════════════
-with tab8:
     st.subheader("📍 תיקון מיקום חנות")
     st.caption("לחץ על חנות → לחץ על המפה במיקום הנכון → שמור")
 
