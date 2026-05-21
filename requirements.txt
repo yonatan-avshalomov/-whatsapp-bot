@@ -9,3 +9,4 @@ googlemaps
 qrcode[pil]
 openpyxl
 openai
+beautifulsoup4
