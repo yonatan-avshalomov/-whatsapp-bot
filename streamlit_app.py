@@ -1129,9 +1129,9 @@ def ask_claude(user_msg, context_text, chat_history):
 
 st.title("🏪 ניהול חנויות")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "💬 שיחה", "📝 הערה", "📊 היום", "🗺️ מפה",
-    "➕ חנות", "📅 ביקורים", "📍 מיקום", "🏥 מכבי"
+    "➕ חנות", "📅 ביקורים", "📍 מיקום", "🏥 מכבי", "🎯 מנוע מיקום"
 ])
 
 
@@ -2735,3 +2735,15 @@ with tab8:
                     st.success("🎉 כל הרשומות מסונכרנות!")
                 else:
                     st.info("✅ אין רשומות לסנכרון — הנתונים תואמים את הקובץ הרשמי")
+
+
+# ══════════════════════════════════════════════════════════════
+# לשונית 9 — מנוע אפס-סובלנות: מיקומים וכפילויות
+# ══════════════════════════════════════════════════════════════
+with tab9:
+    from location_engine import render_ui as _render_location_engine
+    _render_location_engine(
+        supabase_url = SUPABASE_URL,
+        supabase_key = SUPABASE_ANON_KEY,
+        maps_api_key = GOOGLE_MAPS_API_KEY,
+    )
