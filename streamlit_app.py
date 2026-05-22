@@ -10,10 +10,8 @@ import base64
 import time
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
-from visit_tracker import get_all_visit_stats, urgency_label, urgency_color_hex, get_overdue_stores, get_never_visited, get_unmatched_branches
-# openai ו-anthropic נטענים בזמן שימוש (lazy) כדי לא להאט את ה-startup
-from database import db as supabase_db
-from kml_exporter import build_kml, build_kml_filename
+# ── כל ייבוא כבד (database / visit_tracker / kml / ai) נטען lazy
+#    בתוך הפונקציה הספציפית שמשתמשת בו — מדלג על זמן startup ✓
 
 # שעון ישראל — Render רץ על UTC
 ISRAEL_TZ = timezone(timedelta(hours=3))
@@ -52,6 +50,13 @@ if SUPABASE_URL:
 GITHUB_REPO  = "yonatan-avshalomov/-whatsapp-bot"
 NOTES_FILE   = "store_notes.csv"
 VISITS_FILE  = "manual_visits.csv"
+
+
+@st.cache_resource
+def _get_db():
+    """Supabase client — נוצר פעם אחת בלבד ומשותף לכל הבקשות (cache_resource)."""
+    from database import StoreDatabase
+    return StoreDatabase()
 
 # ── הגדרות עמוד ──────────────────────────────────────────
 st.set_page_config(
@@ -313,7 +318,7 @@ def get_stores():
 def get_deliveries():
     """תעודות סנזי — Supabase ראשון (real-time), GitHub CSV כגיבוי."""
     try:
-        rows = supabase_db.get_deliveries(months_back=3)
+        rows = _get_db().get_deliveries(months_back=3)
         if rows:
             return rows
     except Exception:
@@ -332,7 +337,7 @@ def get_deliveries():
 def get_notes():
     """קורא הערות מ-Supabase (מהיר) עם fallback ל-GitHub."""
     try:
-        rows = supabase_db.get_notes(limit=300)
+        rows = _get_db().get_notes(limit=300)
         if rows:
             return rows
     except Exception:
@@ -350,7 +355,7 @@ def get_notes():
 def get_manual_visits():
     """קורא ביקורים מ-Supabase (מהיר) עם fallback ל-GitHub."""
     try:
-        rows = supabase_db.get_visits(limit=500)
+        rows = _get_db().get_visits(limit=500)
         if rows:
             return rows
     except Exception:
@@ -368,7 +373,7 @@ def get_manual_visits():
 def get_aliases() -> dict:
     """טוען aliasים מאושרים מ-Supabase — {branch_norm: store_name}."""
     try:
-        return supabase_db.get_aliases()
+        return _get_db().get_aliases()
     except Exception:
         return {}
 
@@ -387,10 +392,11 @@ def get_visit_stats_cached() -> dict:
         return st.session_state[_KEY]
 
     # ── נסה Supabase view קודם ──
-    result = supabase_db.get_visit_stats_from_view()
+    result = _get_db().get_visit_stats_from_view()
 
-    # ── fallback: Python computation ──
+    # ── fallback: Python computation (lazy import) ──
     if not result:
+        from visit_tracker import get_all_visit_stats
         result = get_all_visit_stats(
             get_stores(), get_deliveries(), get_manual_visits(), aliases=get_aliases()
         )
@@ -406,6 +412,7 @@ def get_unmatched_cached() -> list:
     if (st.session_state.get(_KEY) is not None and
             time.time() - st.session_state.get(_TS, 0) < _TTL):
         return st.session_state[_KEY]
+    from visit_tracker import get_unmatched_branches
     result = get_unmatched_branches(get_deliveries(), get_stores(), get_aliases())
     st.session_state[_KEY] = result
     st.session_state[_TS]  = time.time()
@@ -415,7 +422,7 @@ def get_unmatched_cached() -> list:
 def save_alias_to_db(branch_raw: str, store_name: str) -> bool:
     """שומר alias חדש ל-Supabase."""
     try:
-        ok = supabase_db.save_alias(branch_raw, store_name)
+        ok = _get_db().save_alias(branch_raw, store_name)
         if ok:
             get_aliases.clear()
         return ok
@@ -447,7 +454,7 @@ def _github_update_file(filename: str, transform_fn, commit_msg: str) -> bool:
 
 def save_note_to_github(date, store, city, note):
     """שומר הערה — Supabase ראשון, GitHub כגיבוי."""
-    if supabase_db.add_note(date, store, city, note):
+    if _get_db().add_note(date, store, city, note):
         return True
     new_line = f'\n{date},{store},{city},"{note}"'
     return _github_update_file(
@@ -459,7 +466,7 @@ def save_note_to_github(date, store, city, note):
 
 def save_visit_to_github(date, store, city, status, notes=""):
     """שומר ביקור — Supabase ראשון, GitHub כגיבוי."""
-    if supabase_db.add_visit(date, store, city, status, notes):
+    if _get_db().add_visit(date, store, city, status, notes):
         return True
     new_line = f'\n{date},{store},{city},{status},{notes}'
     return _github_update_file(
@@ -1122,12 +1129,6 @@ def ask_claude(user_msg, context_text, chat_history):
 
 st.title("🏪 ניהול חנויות")
 
-# ── טעינת נתונים פעם אחת לכל ה-render (מכל-cached, מהיר) ──
-_stores     = get_stores()
-_deliveries = get_deliveries()
-_notes      = get_notes()
-_visits     = get_manual_visits()
-
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "💬 שיחה", "📝 הערה", "📊 היום", "🗺️ מפה",
     "➕ חנות", "📅 ביקורים", "📍 מיקום", "🏥 מכבי"
@@ -1155,10 +1156,10 @@ with tab1:
 
         with st.chat_message("assistant"):
             with st.spinner("מחפש..."):
-                stores     = _stores
-                deliveries = _deliveries
-                notes      = _notes
-                visits     = _visits
+                stores     = get_stores()
+                deliveries = get_deliveries()
+                notes      = get_notes()
+                visits     = get_manual_visits()
 
                 # ── זיהוי ביקור מהשיחה: "ביקרתי ב...", "הייתי ב..." ──
                 visited_stores = detect_visit_in_msg(prompt, stores)
@@ -1221,7 +1222,7 @@ with tab1:
 with tab2:
     st.subheader("📝 הוסף הערה על חנות")
 
-    stores = _stores
+    stores = get_stores()
     store_names = sorted(set(s["name"] for s in stores))
     cities      = sorted(set(s["city"] for s in stores if s["city"]))
 
@@ -1347,7 +1348,7 @@ with tab2:
             st.error("נא לבחור חנות ולכתוב הערה")
 
     st.divider()
-    all_notes = _notes
+    all_notes = get_notes()
     local     = st.session_state.get("local_notes", [])
     all_combined = all_notes + local
 
@@ -1418,9 +1419,9 @@ with tab3:
     st.subheader("📊 סיכום היום")
 
     today_str  = today_il()
-    deliveries = _deliveries
-    visits     = _visits
-    notes      = _notes
+    deliveries = get_deliveries()
+    visits     = get_manual_visits()
+    notes      = get_notes()
 
     today_del = [d for d in deliveries if d.get("date","").startswith(today_str)]
     today_vis = [v for v in visits    if v.get("date","") == today_str or v.get("date","").startswith(today_str)]
@@ -1441,7 +1442,7 @@ with tab3:
 
     if today_vis:
         st.subheader("👣 ביקורים")
-        stores_map  = {s["name"]: s for s in _stores}
+        stores_map  = {s["name"]: s for s in get_stores()}
         for v in today_vis:
             icon       = "✅" if v.get("status") == "ביקור" else "⚠️"
             v_store    = v.get('store', '')
@@ -1710,7 +1711,7 @@ with tab4:
 
     with st.spinner("טוען מפה..."):
         map_html = build_store_map_html()
-        map_stores = _stores
+        map_stores = get_stores()
 
     st.components.v1.html(map_html, height=580, scrolling=False)
 
@@ -1755,6 +1756,7 @@ with tab4:
 
     with col_kml2:
         try:
+            from kml_exporter import build_kml, build_kml_filename
             _kml_vstats = get_visit_stats_cached()
             _kml_bytes  = build_kml(map_stores, _kml_vstats)
             _kml_name   = build_kml_filename()
@@ -1823,7 +1825,7 @@ with tab5:
             if not new_name.strip() or not new_city.strip():
                 st.error("⚠️ שם חנות ועיר הם שדות חובה.")
             else:
-                existing_stores = _stores
+                existing_stores = get_stores()
 
                 # ── Rule A: בדיקת כפילויות ──────────────────────
                 duplicates = find_duplicate_stores(
@@ -1873,10 +1875,12 @@ with tab5:
 with tab6:
     st.subheader("📅 מעקב ביקורים — 3 חודשים אחרונים")
 
+    from visit_tracker import get_overdue_stores, get_never_visited, urgency_label
+
     with st.spinner("מחשב היסטוריית ביקורים..."):
         visit_stats  = get_visit_stats_cached()
-        v_stores     = _stores
-        v_deliveries = _deliveries
+        v_stores     = get_stores()
+        v_deliveries = get_deliveries()
         v_aliases    = get_aliases()
 
     # ── נתונים כלליים ──────────────────────────────
@@ -1898,10 +1902,12 @@ with tab6:
     st.divider()
 
     # ── פילטר תצוגה ─────────────────────────────────
+    _PAGE_SIZE = 30
     view = st.radio(
         "הצג:",
         ["🔴 דחוף (45+ ימים)", "🟡 שים לב (21-44 ימים)", "⚫ לא בוקרו כלל", "✅ כל הביקורים"],
-        horizontal=True
+        horizontal=True,
+        index=0,   # ברירת מחדל: דחוף
     )
 
     # ── בנה טבלה לפי פילטר ──────────────────────────
@@ -1924,12 +1930,37 @@ with tab6:
     if not display_stores:
         st.success(empty_msg)
     else:
-        st.caption(f"מציג {len(display_stores)} חנויות")
+        total_pages = max(1, math.ceil(len(display_stores) / _PAGE_SIZE))
+        # ── Pagination state (reset when view changes) ──
+        if st.session_state.get("_tab6_view") != view:
+            st.session_state["_tab6_view"] = view
+            st.session_state["_tab6_page"] = 0
+        cur_page = st.session_state.get("_tab6_page", 0)
+        cur_page = max(0, min(cur_page, total_pages - 1))
+
+        page_start = cur_page * _PAGE_SIZE
+        page_stores = display_stores[page_start: page_start + _PAGE_SIZE]
+
+        col_pg1, col_pg2, col_pg3 = st.columns([1, 2, 1])
+        with col_pg1:
+            if st.button("◀ הקודם", key="tab6_prev", disabled=(cur_page == 0)):
+                st.session_state["_tab6_page"] = cur_page - 1
+                st.rerun()
+        with col_pg2:
+            st.caption(
+                f"עמוד {cur_page + 1} / {total_pages}  "
+                f"({page_start + 1}–{min(page_start + _PAGE_SIZE, len(display_stores))} "
+                f"מתוך {len(display_stores)} חנויות)"
+            )
+        with col_pg3:
+            if st.button("הבא ▶", key="tab6_next", disabled=(cur_page >= total_pages - 1)):
+                st.session_state["_tab6_page"] = cur_page + 1
+                st.rerun()
 
         # ── טבלה ────────────────────────────────────
-        tab6_notes = _notes + st.session_state.get("local_notes", [])
+        tab6_notes = get_notes() + st.session_state.get("local_notes", [])
 
-        for s in display_stores:
+        for s in page_stores:
             name  = s["name"]
             city  = s.get("city", "")
             chain = s.get("chain", "")
@@ -2155,7 +2186,7 @@ with tab7:
         from streamlit_folium import st_folium
         import folium
 
-        fix_stores = _stores
+        fix_stores = get_stores()
 
         # ── חיפוש חנות ───────────────────────────────
         col_s1, col_s2 = st.columns([3, 1])
@@ -2282,7 +2313,7 @@ with tab7:
                     # ── 1. עדכן Supabase ──────────────────────
                     store_id = chosen.get("id")
                     if store_id:
-                        ok_db = supabase_db.update_store_coords(
+                        ok_db = _get_db().update_store_coords(
                             store_id=int(store_id),
                             lat=new_lat,
                             lon=new_lon,
@@ -2375,7 +2406,7 @@ with tab7:
     with col_audit1:
         if st.button("🔍 סרוק חנויות חסרות מיקום", key="audit_scan", type="secondary"):
             with st.spinner("סורק Supabase..."):
-                missing = supabase_db.get_stores_missing_coords()
+                missing = _get_db().get_stores_missing_coords()
             if not missing:
                 st.success("✅ כל החנויות כבר מגאוקדות!")
             else:
@@ -2427,7 +2458,7 @@ with tab7:
                         )
 
                         if result and result.get("lat") and result.get("lon"):
-                            ok = supabase_db.update_store_coords(
+                            ok = _get_db().update_store_coords(
                                 store_id          = store["id"],
                                 lat               = result["lat"],
                                 lon               = result["lon"],
@@ -2537,7 +2568,7 @@ with tab8:
             if st.button("🔍 השווה מול Supabase", key="mac_compare", type="secondary"):
                 with st.spinner("שולף נתוני מכבי פארם מ-Supabase..."):
                     try:
-                        res = supabase_db.client.table("stores") \
+                        res = _get_db().client.table("stores") \
                             .select("id,name,city,chain,address,lat,lon") \
                             .in_("chain", ["מכבי פארם", "מכבי",
                                            "מכבי שירותי בריאות",
@@ -2665,7 +2696,7 @@ with tab8:
                                 if geo.get("formatted_address"):
                                     payload["address"] = geo["formatted_address"]
 
-                            supabase_db.client.table("stores") \
+                            _get_db().client.table("stores") \
                                 .update(payload).eq("id", store_id).execute()
 
                             synced_ok.append({

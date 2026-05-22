@@ -223,7 +223,7 @@ def geocode_address(address: str, city: str, api_key: str) -> dict | None:
 
     try:
         time.sleep(0.06)        # rate limit ≤ 20 req/sec
-        r    = requests.get(url, params=params, timeout=10)
+        r    = requests.get(url, params=params, timeout=10, verify=False)
         data = r.json()
     except Exception as e:
         return None
@@ -234,7 +234,7 @@ def geocode_address(address: str, city: str, api_key: str) -> dict | None:
             g_url    = "https://maps.googleapis.com/maps/api/geocode/json"
             g_params = {"address": query, "language": "he", "region": "il", "key": api_key}
             time.sleep(0.06)
-            r    = requests.get(g_url, params=g_params, timeout=10)
+            r    = requests.get(g_url, params=g_params, timeout=10, verify=False)
             data = r.json()
         except Exception:
             return None
