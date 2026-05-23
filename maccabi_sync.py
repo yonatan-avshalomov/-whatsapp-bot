@@ -247,8 +247,8 @@ def geocode_address(address: str, city: str, api_key: str) -> dict | None:
         fmt = data["results"][0].get("formatted_address", "")
 
     lat, lon = loc["lat"], loc["lng"]
-    # בדיקת גבולות ישראל
-    if not (29.4 <= lat <= 33.4 and 34.2 <= lon <= 35.9):
+    # בדיקת גבולות ישראל (lat: 29.0–33.5, lon: 34.0–36.0)
+    if not (29.0 <= lat <= 33.5 and 34.0 <= lon <= 36.0):
         return None
 
     return {

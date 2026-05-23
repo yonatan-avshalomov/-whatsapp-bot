@@ -34,8 +34,41 @@ LOG_FILE      = Path(__file__).parent / "geocode_log.txt"
 RATE_LIMIT    = 0.05   # שניות בין קריאות Google (20 req/sec בחינמי)
 NOM_RATE      = 1.2    # שניות בין קריאות Nominatim (חייב ≥1s)
 
-# גבולות ישראל (lat/lon bounding box)
-ISRAEL_BBOX = {"lat_min": 29.4, "lat_max": 33.4, "lon_min": 34.2, "lon_max": 35.9}
+# גבולות ישראל (lat/lon bounding box) — רחב מעט לכסות אילת + גולן
+ISRAEL_BBOX = {"lat_min": 29.0, "lat_max": 33.5, "lon_min": 34.0, "lon_max": 36.0}
+
+# קואורדינטות מרכזי ערים — לזיהוי כשל גיאוקודינג (דיפולט מרכז עיר)
+_CITY_CENTER: dict[str, tuple[float, float]] = {
+    "תל אביב":       (32.087,  34.780),
+    "ירושלים":       (31.768,  35.214),
+    "חיפה":          (32.794,  34.989),
+    "באר שבע":       (31.244,  34.791),
+    "נתניה":         (32.329,  34.857),
+    "ראשון לציון":   (31.964,  34.806),
+    "הרצליה":        (32.165,  34.843),
+    "פתח תקווה":     (32.084,  34.887),
+    "אשדוד":         (31.804,  34.649),
+    "חולון":         (32.011,  34.779),
+    "רמת גן":        (32.082,  34.814),
+    "בני ברק":       (32.084,  34.834),
+    "רעננה":         (32.184,  34.871),
+    "כפר סבא":       (32.175,  34.906),
+    "מודיעין":       (31.893,  35.010),
+    "הוד השרון":     (32.150,  34.893),
+    "כרמיאל":        (32.916,  35.298),
+    "נהריה":         (33.007,  35.098),
+    "עפולה":         (32.607,  35.289),
+    "נצרת":          (32.701,  35.303),
+    "אשקלון":        (31.668,  34.572),
+    "רחובות":        (31.896,  34.811),
+    "חדרה":          (32.434,  34.918),
+    "עכו":           (32.926,  35.082),
+    "טבריה":         (32.795,  35.531),
+    "קרית גת":       (31.606,  34.770),
+    "נס ציונה":      (31.929,  34.795),
+    "רמלה":          (31.929,  34.872),
+    "לוד":           (31.952,  34.898),
+}
 
 logging.basicConfig(
     filename=str(LOG_FILE), level=logging.INFO,
@@ -75,6 +108,19 @@ def haversine(lat1, lon1, lat2, lon2) -> float:
          math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
          math.sin(dlon/2)**2)
     return R * 2 * math.asin(math.sqrt(a))
+
+
+def _is_city_center_default(lat: float, lon: float, city: str,
+                             threshold_m: float = 350) -> bool:
+    """
+    מחזיר True אם הקואורדינטות נמצאות בטווח threshold_m מטרים ממרכז העיר.
+    סימן אזהרה: Google דיפולט למרכז עיר במקום כתובת ספציפית.
+    """
+    for key, (clat, clon) in _CITY_CENTER.items():
+        if key in city or city in key:
+            return haversine(lat, lon, clat, clon) * 1000 <= threshold_m
+    return False
+
 
 # ── Google Places Text Search ─────────────────────────────────────────────────
 def _geocode_places(name: str, city: str, api_key: str) -> dict | None:
@@ -116,13 +162,17 @@ def _geocode_places(name: str, city: str, api_key: str) -> dict | None:
         loc = res["geometry"]["location"]
         lat, lon = loc["lat"], loc["lng"]
         if _in_israel(lat, lon):
+            suspected = _is_city_center_default(lat, lon, city)
+            if suspected:
+                log.warning(f"Places: city-center default suspected for '{query}' → {lat},{lon}")
             return {
-                "lat":               round(lat, 6),
-                "lon":               round(lon, 6),
-                "formatted_address": res.get("formatted_address", ""),
-                "place_id":          res.get("place_id", ""),
-                "source":            "places",
-                "geocoded_at":       datetime.now().strftime("%Y-%m-%d"),
+                "lat":                  round(lat, 6),
+                "lon":                  round(lon, 6),
+                "formatted_address":    res.get("formatted_address", ""),
+                "place_id":             res.get("place_id", ""),
+                "source":               "places",
+                "geocoded_at":          datetime.now().strftime("%Y-%m-%d"),
+                "city_center_suspected": suspected,
             }
 
     log.warning(f"Places: all results outside Israel for '{query}'")
@@ -139,7 +189,8 @@ def _geocode_google(address: str, city: str, api_key: str) -> dict | None:
     import googlemaps
 
     gmaps = googlemaps.Client(key=api_key)
-    query = f"{address}, {city}, Israel" if city else f"{address}, Israel"
+    # ── Bulletproof query: always include city + ישראל in Hebrew ──
+    query = f"{address}, {city}, ישראל" if city else f"{address}, ישראל"
 
     try:
         results = gmaps.geocode(query, language="he", region="il")
@@ -159,13 +210,18 @@ def _geocode_google(address: str, city: str, api_key: str) -> dict | None:
         log.warning(f"Google: result outside Israel for '{query}' → {lat},{lon}")
         return None
 
+    suspected = _is_city_center_default(lat, lon, city)
+    if suspected:
+        log.warning(f"Google: city-center default suspected for '{query}' → {lat},{lon}")
+
     return {
-        "lat":               round(lat, 6),
-        "lon":               round(lon, 6),
-        "formatted_address": r.get("formatted_address", ""),
-        "place_id":          r.get("place_id", ""),
-        "source":            "google",
-        "geocoded_at":       datetime.now().strftime("%Y-%m-%d"),
+        "lat":                  round(lat, 6),
+        "lon":                  round(lon, 6),
+        "formatted_address":    r.get("formatted_address", ""),
+        "place_id":             r.get("place_id", ""),
+        "source":               "google",
+        "geocoded_at":          datetime.now().strftime("%Y-%m-%d"),
+        "city_center_suspected": suspected,
     }
 
 # ── Nominatim (fallback) ─────────────────────────────────────────────────────
@@ -198,13 +254,18 @@ def _geocode_nominatim(address: str, city: str) -> dict | None:
         log.warning(f"Nominatim: result outside Israel for '{query}' → {lat},{lon}")
         return None
 
+    suspected = _is_city_center_default(lat, lon, city)
+    if suspected:
+        log.warning(f"Nominatim: city-center default suspected for '{query}' → {lat},{lon}")
+
     return {
-        "lat":               round(lat, 6),
-        "lon":               round(lon, 6),
-        "formatted_address": data[0].get("display_name", ""),
-        "place_id":          data[0].get("osm_id", ""),
-        "source":            "nominatim",
-        "geocoded_at":       datetime.now().strftime("%Y-%m-%d"),
+        "lat":                  round(lat, 6),
+        "lon":                  round(lon, 6),
+        "formatted_address":    data[0].get("display_name", ""),
+        "place_id":             data[0].get("osm_id", ""),
+        "source":               "nominatim",
+        "geocoded_at":          datetime.now().strftime("%Y-%m-%d"),
+        "city_center_suspected": suspected,
     }
 
 # ── פונקציה ראשית (לפי שם עסק — הכי מדויק) ──────────────────────────────────

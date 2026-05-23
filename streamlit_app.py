@@ -1557,6 +1557,18 @@ def build_store_map_html() -> str:
                 return v
         return "#555555"
 
+    # ── Rule 3: זיהוי דיפולט מרכז עיר — איתור כמה חנויות בעיר שחולקות קואורדינטות זהות ──
+    from collections import defaultdict
+    coord_count: dict = defaultdict(int)
+    for s in stores_list:
+        try:
+            lat = round(float(s.get("lat") or 0), 3)
+            lon = round(float(s.get("lon") or 0), 3)
+        except Exception:
+            continue
+        if lat and lon:
+            coord_count[(s.get("city", ""), lat, lon)] += 1
+
     markers = []
     for s in stores_list:
         try:
@@ -1572,11 +1584,15 @@ def build_store_map_html() -> str:
         ring   = status_color(raw)
         fill   = chain_fill(s.get("chain", ""))
         addr   = s.get("address", "")
+        # flag stores sharing coordinates with another store in same city
+        coord_key = (s.get("city", ""), round(lat, 3), round(lon, 3))
+        geo_suspect = coord_count.get(coord_key, 1) > 1
         markers.append({
             "lat": round(lat, 5), "lon": round(lon, 5),
             "name": name, "city": s.get("city",""),
             "addr": addr, "chain": s.get("chain","") or "פרטי",
             "fill": fill, "ring": ring, "status": s_txt,
+            "geo_suspect": geo_suspect,
         })
 
     mj = json.dumps(markers, ensure_ascii=False)
@@ -1626,21 +1642,35 @@ const cluster = L.markerClusterGroup({{
   }}
 }});
 
-function buildIcon(fill,ring){{
+function buildIcon(fill,ring,suspect){{
+  const badge = suspect
+    ? `<div style="position:absolute;top:-6px;right:-6px;background:#FF6600;
+                   color:white;border-radius:50%;width:13px;height:13px;
+                   font-size:9px;display:flex;align-items:center;
+                   justify-content:center;font-weight:bold;line-height:1">!</div>`
+    : '';
   return L.divIcon({{
     className:'',
-    html:`<div style="background:${{fill}};width:12px;height:12px;border-radius:50%;
-          border:3px solid ${{ring}};box-shadow:0 0 4px rgba(0,0,0,.45)"></div>`,
+    html:`<div style="position:relative;width:18px;height:18px">
+            <div style="background:${{fill}};width:12px;height:12px;border-radius:50%;
+              border:3px solid ${{ring}};box-shadow:0 0 4px rgba(0,0,0,.45);
+              position:absolute;top:3px;left:3px"></div>
+            ${{badge}}
+          </div>`,
     iconSize:[18,18],iconAnchor:[9,9],popupAnchor:[0,-9]
   }});
 }}
 
 DATA.forEach(m=>{{
-  const mk = L.marker([m.lat,m.lon],{{icon:buildIcon(m.fill,m.ring)}});
+  const mk = L.marker([m.lat,m.lon],{{icon:buildIcon(m.fill,m.ring,m.geo_suspect)}});
+  const suspectHtml = m.geo_suspect
+    ? `<br><span style="color:#FF6600;font-size:11px">⚠️ חשד לדיפולט מרכז עיר — יש לוודא מיקום</span>`
+    : '';
   const popup = `<div dir="rtl" style="min-width:180px">
     <b style="font-size:14px">${{m.name}}</b><br>
     📍 ${{m.city}}${{m.addr?' — '+m.addr:''}}<br>
     <span style="font-size:13px">${{m.status}}</span>
+    ${{suspectHtml}}
   </div>`;
   mk.bindPopup(popup);
   mk._chain = m.chain;
@@ -2437,9 +2467,11 @@ with tab7:
             if st.button("🚀 גאוקד הכל אוטומטית", key="audit_geocode", type="primary"):
                 try:
                     from geocoder import geocode_store
+                    from collections import defaultdict
 
                     updated_ok   = []
                     exceptions   = []
+                    city_suspects = []   # city-center default suspects
                     progress_bar = st.progress(0, text="מגאוקד...")
 
                     # העבר API key לסביבה
@@ -2457,7 +2489,17 @@ with tab7:
                             city    = store.get("city", ""),
                         )
 
+                        # ── Rule 2: bbox validation (29.0–33.5 / 34.0–36.0) ──
                         if result and result.get("lat") and result.get("lon"):
+                            rlat, rlon = float(result["lat"]), float(result["lon"])
+                            if not (29.0 <= rlat <= 33.5 and 34.0 <= rlon <= 36.0):
+                                exceptions.append({
+                                    "name":   store.get("name", ""),
+                                    "city":   store.get("city", ""),
+                                    "reason": f"קואורדינטות מחוץ לישראל ({rlat:.4f},{rlon:.4f})",
+                                })
+                                continue
+
                             ok = _get_db().update_store_coords(
                                 store_id          = store["id"],
                                 lat               = result["lat"],
@@ -2465,14 +2507,18 @@ with tab7:
                                 formatted_address = result.get("formatted_address", ""),
                             )
                             if ok:
-                                updated_ok.append({
-                                    "name":    store.get("name", ""),
-                                    "city":    store.get("city", ""),
-                                    "lat":     result["lat"],
-                                    "lon":     result["lon"],
-                                    "source":  result.get("source", ""),
-                                    "address": result.get("formatted_address", ""),
-                                })
+                                rec = {
+                                    "name":              store.get("name", ""),
+                                    "city":              store.get("city", ""),
+                                    "lat":               result["lat"],
+                                    "lon":               result["lon"],
+                                    "source":            result.get("source", ""),
+                                    "address":           result.get("formatted_address", ""),
+                                    "city_center_flag":  result.get("city_center_suspected", False),
+                                }
+                                updated_ok.append(rec)
+                                if result.get("city_center_suspected"):
+                                    city_suspects.append(rec)
                             else:
                                 exceptions.append({
                                     "name":   store.get("name", ""),
@@ -2488,16 +2534,23 @@ with tab7:
 
                     progress_bar.empty()
 
-                    # נקה cache
-                    get_stores.clear()
-                    st.session_state.pop("audit_missing", None)
+                    # ── Rule 3: זיהוי דיפולט מרכז עיר — כמה חנויות בעיר קיבלו קואורדינטות זהות ──
+                    coord_groups: dict = defaultdict(list)
+                    for r in updated_ok:
+                        coord_groups[(r["city"], round(r["lat"], 4), round(r["lon"], 4))].append(r["name"])
+                    dup_coord_suspects = {k: v for k, v in coord_groups.items() if len(v) > 1}
 
-                    # שמור exceptions ל-session state
-                    st.session_state["audit_exceptions"] = exceptions
+                    # ── Rule 4: נקה cache — רענן מפה עם נתונים חדשים ──
+                    st.cache_data.clear()
+                    st.session_state.pop("audit_missing", None)
+                    st.session_state["audit_exceptions"]     = exceptions
+                    st.session_state["audit_city_suspects"]  = city_suspects
+                    st.session_state["audit_dup_coords"]     = dup_coord_suspects
 
                     st.success(
                         f"✅ גיאוקודינג הושלם!\n\n"
                         f"- עודכנו בהצלחה: **{len(updated_ok)}** חנויות\n"
+                        f"- חשד לדיפולט מרכז עיר: **{len(city_suspects) + len(dup_coord_suspects)}**\n"
                         f"- חנויות שלא נמצאו: **{len(exceptions)}**"
                     )
 
@@ -2505,13 +2558,36 @@ with tab7:
                         st.dataframe(
                             [{"שם": r["name"], "עיר": r["city"],
                               "lat": r["lat"], "lon": r["lon"],
-                              "מקור": r["source"]}
+                              "מקור": r["source"],
+                              "⚠️ מרכז עיר?": "⚠️" if r["city_center_flag"] else "✅"}
                              for r in updated_ok],
                             use_container_width=True
                         )
 
                 except Exception as _geo_err:
                     st.error(f"❌ שגיאה בגיאוקודינג: {_geo_err}")
+
+    # ── City-Center Default Report ─────────────────────────
+    _suspects = st.session_state.get("audit_city_suspects", [])
+    _dup_coords = st.session_state.get("audit_dup_coords", {})
+    if _suspects or _dup_coords:
+        st.divider()
+        st.subheader("⚠️ דוח חשד לדיפולט מרכז עיר")
+        st.caption(
+            "הגיאוקודינג החזיר קואורדינטות הזהות למרכז העיר — "
+            "ייתכן ש-Google לא מצא את הרחוב ודיפולט לעיר. "
+            "יש לתקן ידנית דרך המפה למעלה."
+        )
+        for r in _suspects:
+            st.markdown(
+                f"⚠️ **{r['name']}** | {r['city']} — "
+                f"`{r['lat']:.5f}, {r['lon']:.5f}` (מקור: {r['source']})"
+            )
+        for (city, lat, lon), names in _dup_coords.items():
+            st.markdown(
+                f"⚠️ **{city}** — {len(names)} חנויות עם קואורדינטות זהות "
+                f"`{lat:.4f}, {lon:.4f}`: {', '.join(names)}"
+            )
 
     # ── Exceptions Report ─────────────────────────────────
     if st.session_state.get("audit_exceptions"):
