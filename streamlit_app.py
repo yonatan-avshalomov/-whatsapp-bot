@@ -2210,7 +2210,7 @@ with tab6:
 # ════════════════════════════════════════════
 with tab7:
     st.subheader("📍 תיקון מיקום חנות")
-    st.caption("לחץ על חנות → לחץ על המפה במיקום הנכון → שמור")
+    st.caption("בחר חנות ← חפש כתובת / לחץ מפה ← אשר ושמור")
 
     try:
         from streamlit_folium import st_folium
@@ -2218,208 +2218,378 @@ with tab7:
 
         fix_stores = get_stores()
 
-        # ── חיפוש חנות ───────────────────────────────
+        # ══════════════════════════════════════════════════
+        # בחירת חנות
+        # ══════════════════════════════════════════════════
         col_s1, col_s2 = st.columns([3, 1])
         with col_s1:
-            fix_search = st.text_input("חפש חנות", placeholder="שם חנות או עיר...", key="fix_search")
+            fix_search = st.text_input(
+                "חפש חנות", placeholder="שם חנות או עיר...", key="fix_search"
+            )
         with col_s2:
-            fix_chain = st.selectbox("רשת", ["הכל", "שילב", "מכבי פארם", "ניצת הדובדבן", "פרטי"], key="fix_chain")
+            fix_chain = st.selectbox(
+                "רשת",
+                ["הכל", "שילב", "מכבי פארם", "ניצת הדובדבן", "פרטי"],
+                key="fix_chain",
+            )
 
-        # סינון
         filtered_fix = fix_stores
         if fix_search:
-            q = fix_search.strip().lower()
-            filtered_fix = [s for s in filtered_fix
-                            if q in s.get("name","").lower() or q in s.get("city","").lower()]
+            _q = fix_search.strip().lower()
+            filtered_fix = [
+                s for s in filtered_fix
+                if _q in s.get("name", "").lower() or _q in s.get("city", "").lower()
+            ]
         if fix_chain != "הכל":
-            filtered_fix = [s for s in filtered_fix if fix_chain in s.get("chain","")]
+            filtered_fix = [s for s in filtered_fix if fix_chain in s.get("chain", "")]
 
         if not filtered_fix:
             st.warning("לא נמצאו חנויות")
         else:
-            # ── בחירת חנות ───────────────────────────────
             store_labels = [f"{s['name']} | {s.get('city','')}" for s in filtered_fix]
-            chosen_label = st.selectbox("בחר חנות לתיקון", store_labels, key="fix_store_sel")
-            chosen = filtered_fix[store_labels.index(chosen_label)]
+            chosen_label = st.selectbox(
+                "בחר חנות לתיקון", store_labels, key="fix_store_sel"
+            )
+            chosen   = filtered_fix[store_labels.index(chosen_label)]
+            cur_lat  = float(chosen.get("lat") or 32.08)
+            cur_lon  = float(chosen.get("lon") or 34.78)
+            cur_addr = chosen.get("address", "") or ""
 
-            cur_lat = float(chosen.get("lat") or 32.08)
-            cur_lon = float(chosen.get("lon") or 34.78)
+            # ── איפוס state אוטומטי כשמחליפים חנות ──────────
+            _store_key = f"{chosen['name']}|{chosen.get('city','')}"
+            if st.session_state.get("_fix_store_key") != _store_key:
+                for _k in ["_fix_pending_lat", "_fix_pending_lon", "_fix_pending_addr",
+                           "_fix_last_click", "_fix_search_query"]:
+                    st.session_state.pop(_k, None)
+                st.session_state["_fix_store_key"] = _store_key
 
-            st.info(f"**{chosen['name']}** | {chosen.get('city','')} | {chosen.get('address','')}\n\n"
-                    f"מיקום נוכחי: `{cur_lat}, {cur_lon}`")
+            st.info(
+                f"**{chosen['name']}** | {chosen.get('city', '')} | "
+                f"{cur_addr or '—'}\n\n"
+                f"מיקום שמור: `{cur_lat:.6f}, {cur_lon:.6f}`"
+            )
 
-            # ── מפה אינטראקטיבית ──────────────────────────
-            st.markdown("**לחץ על המפה במיקום הנכון של החנות:**")
+            # ══════════════════════════════════════════════════
+            # שלב 1 — חיפוש כתובת ספציפית + גיאוקודינג
+            # ══════════════════════════════════════════════════
+            st.markdown("##### 🔍 שלב 1 — חפש כתובת ספציפית")
+            _col_addr, _col_btn = st.columns([5, 1])
+            with _col_addr:
+                _addr_input = st.text_input(
+                    "חפש כתובת ספציפית",
+                    label_visibility="collapsed",
+                    placeholder=f"לדוגמה: רחוב הרצל 10, {chosen.get('city', '')}",
+                    key="fix_addr_query",
+                )
+            with _col_btn:
+                st.write("")   # יישור אנכי
+                _search_btn = st.button(
+                    "🔍 חפש", key="fix_addr_search_btn", use_container_width=True
+                )
 
-            m = folium.Map(location=[cur_lat, cur_lon], zoom_start=16)
-
-            # סמן נוכחי (אדום)
-            folium.Marker(
-                [cur_lat, cur_lon],
-                popup=f"מיקום נוכחי: {chosen['name']}",
-                icon=folium.Icon(color="red", icon="home")
-            ).add_to(m)
-
-            # הוסף מעגל כדי שיהיה ברור איפה המיקום
-            folium.Circle(
-                [cur_lat, cur_lon],
-                radius=50,
-                color="red",
-                fill=True,
-                fill_opacity=0.2
-            ).add_to(m)
-
-            map_data = st_folium(m, use_container_width=True, height=420, key="fix_map")
-
-            # ── GPS מהנייד (לחלופין ללחיצה על המפה) ──────
-            st.divider()
-            st.caption("או: קבל מיקום ישירות מהטלפון:")
-            from gps_component import render_gps_button, save_store_location
-            gps_coords = render_gps_button(key="loc_gps")
-            if gps_coords:
-                st.session_state["gps_lat"] = gps_coords["lat"]
-                st.session_state["gps_lon"] = gps_coords["lon"]
-                st.success(f"📡 GPS: **{gps_coords['lat']}, {gps_coords['lon']}**")
-
-            # ── עיבוד מיקום (מפה או GPS) ──────────────────
-            new_lat = new_lon = None
-
-            # GPS גובר על לחיצת מפה אם קיים
-            if st.session_state.get("gps_lat") and st.session_state.get("gps_lon"):
-                new_lat = round(st.session_state["gps_lat"], 6)
-                new_lon = round(st.session_state["gps_lon"], 6)
-                st.info(f"📡 מיקום מהטלפון: **{new_lat}, {new_lon}**")
-            elif map_data and map_data.get("last_clicked"):
-                new_lat = round(map_data["last_clicked"]["lat"], 6)
-                new_lon = round(map_data["last_clicked"]["lng"], 6)
-                st.success(f"📍 נבחר מיקום מהמפה: **{new_lat}, {new_lon}**")
-
-            if new_lat and new_lon:
-                # ── Reverse Geocoding — כתובת מיידית ────────
-                rg_key = f"_rg_{new_lat}_{new_lon}"
-                if st.session_state.get(rg_key) is None:
-                    with st.spinner("🔍 מאחזר כתובת..."):
-                        fetched_address = ""
+            if _search_btn and _addr_input.strip():
+                if not GOOGLE_MAPS_API_KEY:
+                    st.warning("⚠️ GOOGLE_MAPS_API_KEY לא מוגדר")
+                else:
+                    with st.spinner("🔍 מגאוקד כתובת..."):
+                        _geo_ok = False
                         try:
-                            if GOOGLE_MAPS_API_KEY:
-                                os.environ["GOOGLE_MAPS_API_KEY"] = GOOGLE_MAPS_API_KEY
-                                rg_url = "https://maps.googleapis.com/maps/api/geocode/json"
-                                rg_params = {
-                                    "latlng":   f"{new_lat},{new_lon}",
+                            _full_q = (
+                                f"{_addr_input.strip()}, "
+                                f"{chosen.get('city', '')}, ישראל"
+                            )
+                            _gr = requests.get(
+                                "https://maps.googleapis.com/maps/api/geocode/json",
+                                params={
+                                    "address":  _full_q,
                                     "language": "he",
                                     "region":   "il",
                                     "key":      GOOGLE_MAPS_API_KEY,
-                                }
-                                rg_resp = requests.get(rg_url, params=rg_params, timeout=10)
-                                rg_data = rg_resp.json()
-                                if rg_data.get("status") == "OK" and rg_data.get("results"):
-                                    fetched_address = rg_data["results"][0].get(
-                                        "formatted_address", ""
+                                },
+                                timeout=10,
+                            )
+                            _gd = _gr.json()
+                            if _gd.get("status") == "OK" and _gd.get("results"):
+                                _loc = _gd["results"][0]["geometry"]["location"]
+                                _glat = round(_loc["lat"], 6)
+                                _glon = round(_loc["lng"], 6)
+                                _gfmt = _gd["results"][0].get("formatted_address", "")
+                                # bbox guard (29.0–33.5 / 34.0–36.0)
+                                if 29.0 <= _glat <= 33.5 and 34.0 <= _glon <= 36.0:
+                                    st.session_state["_fix_pending_lat"]   = _glat
+                                    st.session_state["_fix_pending_lon"]   = _glon
+                                    st.session_state["_fix_pending_addr"]  = _gfmt
+                                    st.session_state["_fix_search_query"]  = _addr_input.strip()
+                                    st.session_state.pop("_fix_last_click", None)
+                                    _geo_ok = True
+                                else:
+                                    st.error(
+                                        f"❌ הכתובת מחוץ לגבולות ישראל "
+                                        f"({_glat:.4f}, {_glon:.4f})"
                                     )
-                        except Exception:
-                            pass
-                    st.session_state[rg_key] = fetched_address
+                        except Exception as _ge:
+                            st.error(f"❌ שגיאת API: {_ge}")
+                    if not _geo_ok and _gd.get("status") not in ("OK",):
+                        st.error("❌ לא נמצאה כתובת — נסה ניסוח אחר")
+                    elif _geo_ok:
+                        st.rerun()
 
-                fetched_address = st.session_state.get(rg_key, "")
+            # ══════════════════════════════════════════════════
+            # שלב 2 — מפה אינטראקטיבית (תצוגה מקדימה + כיוונון)
+            # ══════════════════════════════════════════════════
+            _pend_lat  = st.session_state.get("_fix_pending_lat")
+            _pend_lon  = st.session_state.get("_fix_pending_lon")
+            _pend_addr = st.session_state.get("_fix_pending_addr", "")
 
-                # הצג כתובת שנמצאה
-                if fetched_address:
-                    st.info(f"📮 כתובת שנמצאה: **{fetched_address}**")
-                else:
-                    st.warning("⚠️ לא נמצאה כתובת — הקואורדינטות יישמרו ללא כתובת")
+            # מרכז המפה: על התצוגה המקדימה אם קיימת, אחרת מיקום הנוכחי
+            _ctr_lat = _pend_lat if _pend_lat else cur_lat
+            _ctr_lon = _pend_lon if _pend_lon else cur_lon
+            _zoom    = 17 if _pend_lat else 16
 
-                # אפשר עריכה ידנית של הכתובת
-                final_address = st.text_input(
-                    "כתובת (ניתן לערוך)",
-                    value=fetched_address,
-                    key=f"fix_addr_{new_lat}_{new_lon}",
-                    placeholder="רחוב, מספר, עיר"
+            if _pend_lat:
+                st.markdown(
+                    "##### 🗺️ שלב 2 — כיוונון מדויק (לחץ על המפה לזוז)"
+                )
+                st.caption(
+                    f"📌 תצוגה מקדימה: `{_pend_lat:.6f}, {_pend_lon:.6f}` "
+                    f"{'· ' + _pend_addr if _pend_addr else ''}"
+                )
+            else:
+                st.markdown("##### 🗺️ שלב 2 — לחץ על המפה לבחירת מיקום")
+
+            _m = folium.Map(location=[_ctr_lat, _ctr_lon], zoom_start=_zoom)
+
+            # 🔴 סמן נוכחי — מיקום שמור ב-DB
+            folium.Marker(
+                [cur_lat, cur_lon],
+                popup=f"<b>מיקום נוכחי</b><br>{chosen['name']}",
+                tooltip="מיקום נוכחי (שמור)",
+                icon=folium.Icon(color="red", icon="home", prefix="fa"),
+            ).add_to(_m)
+            folium.Circle(
+                [cur_lat, cur_lon], radius=25,
+                color="red", fill=True, fill_opacity=0.15,
+            ).add_to(_m)
+
+            # 🔵 סמן תצוגה מקדימה — תוצאת חיפוש / לחיצה
+            if _pend_lat and _pend_lon and (
+                round(_pend_lat, 5), round(_pend_lon, 5)
+            ) != (round(cur_lat, 5), round(cur_lon, 5)):
+                _search_q = st.session_state.get("_fix_search_query", "")
+                _popup_txt = (
+                    f"<b>תצוגה מקדימה</b><br>"
+                    f"{_pend_addr or _search_q or 'לחיצה על מפה'}"
+                )
+                folium.Marker(
+                    [_pend_lat, _pend_lon],
+                    popup=_popup_txt,
+                    tooltip="📍 תצוגה מקדימה — לחץ 'אשר ושמור' לשמירה",
+                    icon=folium.Icon(color="blue", icon="map-marker", prefix="fa"),
+                ).add_to(_m)
+                folium.Circle(
+                    [_pend_lat, _pend_lon], radius=15,
+                    color="blue", fill=True, fill_opacity=0.25,
+                ).add_to(_m)
+
+            # מפתח דינמי — גורם ל-Folium לרנדר מחדש כשהמרכז משתנה
+            _map_key = (
+                f"fix_map_{_store_key.replace(' ','_')}_"
+                f"{round(_ctr_lat, 3)}_{round(_ctr_lon, 3)}"
+            )
+            _map_data = st_folium(
+                _m, use_container_width=True, height=430, key=_map_key
+            )
+
+            # ── עיבוד לחיצה על מפה → כיוונון מדויק ──────────
+            if _map_data and _map_data.get("last_clicked"):
+                _cl = _map_data["last_clicked"]
+                _clat = round(_cl["lat"], 6)
+                _clon = round(_cl["lng"], 6)
+                if (_clat, _clon) != st.session_state.get("_fix_last_click"):
+                    st.session_state["_fix_pending_lat"]  = _clat
+                    st.session_state["_fix_pending_lon"]  = _clon
+                    st.session_state["_fix_pending_addr"] = ""   # reverse-geocode בשלב 3
+                    st.session_state["_fix_last_click"]   = (_clat, _clon)
+                    st.rerun()
+
+            # ══════════════════════════════════════════════════
+            # GPS מהנייד (אופציונלי)
+            # ══════════════════════════════════════════════════
+            with st.expander("📡 השתמש במיקום GPS מהטלפון", expanded=False):
+                from gps_component import render_gps_button
+                _gps = render_gps_button(key="loc_gps")
+                if _gps:
+                    st.session_state["_fix_pending_lat"]  = round(_gps["lat"], 6)
+                    st.session_state["_fix_pending_lon"]  = round(_gps["lon"], 6)
+                    st.session_state["_fix_pending_addr"] = ""
+                    st.session_state.pop("_fix_last_click", None)
+                    st.rerun()
+
+            # ══════════════════════════════════════════════════
+            # שלב 3 — אישור ושמירה (מוצג רק כשיש תצוגה מקדימה)
+            # ══════════════════════════════════════════════════
+            _pend_lat = st.session_state.get("_fix_pending_lat")
+            _pend_lon = st.session_state.get("_fix_pending_lon")
+
+            if _pend_lat and _pend_lon:
+                st.divider()
+                st.markdown("##### ✅ שלב 3 — אשר ושמור מיקום")
+
+                # Reverse geocoding אוטומטי אם הגיע מלחיצת מפה (אין כתובת)
+                _pend_addr = st.session_state.get("_fix_pending_addr", "")
+                if not _pend_addr and GOOGLE_MAPS_API_KEY:
+                    _rg_key = f"_rg_{_pend_lat}_{_pend_lon}"
+                    if _rg_key not in st.session_state:
+                        with st.spinner("🔍 מאחזר כתובת..."):
+                            try:
+                                _rr = requests.get(
+                                    "https://maps.googleapis.com/maps/api/geocode/json",
+                                    params={
+                                        "latlng":   f"{_pend_lat},{_pend_lon}",
+                                        "language": "he",
+                                        "region":   "il",
+                                        "key":      GOOGLE_MAPS_API_KEY,
+                                    },
+                                    timeout=10,
+                                )
+                                _rd = _rr.json()
+                                st.session_state[_rg_key] = (
+                                    _rd["results"][0].get("formatted_address", "")
+                                    if _rd.get("status") == "OK" and _rd.get("results")
+                                    else ""
+                                )
+                            except Exception:
+                                st.session_state[_rg_key] = ""
+                    _pend_addr = st.session_state.get(_rg_key, "")
+                    if _pend_addr:
+                        st.session_state["_fix_pending_addr"] = _pend_addr
+
+                # מידע על מיקום ממתין
+                _ci1, _ci2 = st.columns(2)
+                _ci1.metric("📍 Latitude",  f"{_pend_lat:.6f}",
+                            delta=f"{_pend_lat - cur_lat:+.5f}")
+                _ci2.metric("📍 Longitude", f"{_pend_lon:.6f}",
+                            delta=f"{_pend_lon - cur_lon:+.5f}")
+
+                _final_addr = st.text_input(
+                    "כתובת (ניתן לערוך לפני שמירה)",
+                    value=_pend_addr,
+                    key="fix_final_addr",
+                    placeholder="רחוב, מספר, עיר",
                 )
 
-                if st.button("💾 שמור מיקום + כתובת", key="fix_save", type="primary",
-                             use_container_width=True):
-                    errors = []
+                _cc1, _cc2 = st.columns([3, 1])
+                with _cc1:
+                    _confirm = st.button(
+                        "✅ אשר ושמור מיקום",
+                        key="fix_confirm_save",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                with _cc2:
+                    if st.button("❌ בטל", key="fix_cancel", use_container_width=True):
+                        for _k in ["_fix_pending_lat", "_fix_pending_lon",
+                                   "_fix_pending_addr", "_fix_last_click",
+                                   "_fix_search_query"]:
+                            st.session_state.pop(_k, None)
+                        st.rerun()
 
-                    # ── 1. עדכן Supabase ──────────────────────
-                    store_id = chosen.get("id")
-                    if store_id:
-                        ok_db = _get_db().update_store_coords(
-                            store_id=int(store_id),
-                            lat=new_lat,
-                            lon=new_lon,
-                            formatted_address=final_address,
+                # ── שמירה — רק בלחיצת אשר ──────────────────
+                if _confirm:
+                    _errors = []
+                    _store_id = chosen.get("id")
+
+                    # 1. Supabase
+                    if _store_id:
+                        _ok_db = _get_db().update_store_coords(
+                            store_id=int(_store_id),
+                            lat=_pend_lat,
+                            lon=_pend_lon,
+                            formatted_address=_final_addr,
                         )
-                        if not ok_db:
-                            errors.append("Supabase")
+                        if not _ok_db:
+                            _errors.append("Supabase")
                     else:
-                        errors.append("Supabase (אין store id)")
+                        _errors.append("Supabase (אין store id)")
 
-                    # ── 2. עדכן GitHub CSV ────────────────────
+                    # 2. GitHub CSV
                     if GITHUB_TOKEN:
                         try:
-                            api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/stores.csv"
-                            gh_headers = {"Authorization": f"token {GITHUB_TOKEN}",
-                                          "Accept": "application/vnd.github.v3+json"}
-                            r = requests.get(api, headers=gh_headers, timeout=15)
-                            data = r.json()
-                            sha  = data.get("sha", "")
-                            csv_text = base64.b64decode(
-                                data.get("content", "")
-                            ).decode("utf-8-sig")
-
-                            reader = csv.DictReader(io.StringIO(csv_text))
-                            rows   = list(reader)
-                            fields = reader.fieldnames or list(rows[0].keys())
-
-                            for row in rows:
-                                if (row["name"] == chosen["name"] and
-                                        row.get("city") == chosen.get("city", "")):
-                                    row["lat"]     = str(new_lat)
-                                    row["lon"]     = str(new_lon)
-                                    if "address" in fields:
-                                        row["address"] = final_address
-                                    break
-
-                            out = io.StringIO()
-                            w = csv.DictWriter(out, fieldnames=fields)
-                            w.writeheader()
-                            w.writerows(rows)
-                            new_content = base64.b64encode(
-                                out.getvalue().encode("utf-8-sig")
-                            ).decode()
-                            payload = {
-                                "message": (f"Fix location: {chosen['name']} "
-                                            f"→ {new_lat},{new_lon}"),
-                                "content": new_content,
-                                "sha":     sha,
+                            _api = (
+                                f"https://api.github.com/repos/"
+                                f"{GITHUB_REPO}/contents/stores.csv"
+                            )
+                            _gh_hdr = {
+                                "Authorization": f"token {GITHUB_TOKEN}",
+                                "Accept": "application/vnd.github.v3+json",
                             }
-                            res = requests.put(api, headers=gh_headers,
-                                               json=payload, timeout=15)
-                            if res.status_code not in (200, 201):
-                                errors.append(f"GitHub ({res.status_code})")
+                            _gr = requests.get(_api, headers=_gh_hdr, timeout=15)
+                            _gd = _gr.json()
+                            _sha = _gd.get("sha", "")
+                            _csv_txt = base64.b64decode(
+                                _gd.get("content", "")
+                            ).decode("utf-8-sig")
+                            _reader = csv.DictReader(io.StringIO(_csv_txt))
+                            _rows   = list(_reader)
+                            _fields = _reader.fieldnames or list(_rows[0].keys())
+                            for _row in _rows:
+                                if (_row["name"] == chosen["name"] and
+                                        _row.get("city") == chosen.get("city", "")):
+                                    _row["lat"] = str(_pend_lat)
+                                    _row["lon"] = str(_pend_lon)
+                                    if "address" in _fields:
+                                        _row["address"] = _final_addr
+                                    break
+                            _out = io.StringIO()
+                            _w   = csv.DictWriter(_out, fieldnames=_fields)
+                            _w.writeheader()
+                            _w.writerows(_rows)
+                            _new_content = base64.b64encode(
+                                _out.getvalue().encode("utf-8-sig")
+                            ).decode()
+                            _put = requests.put(
+                                _api,
+                                headers=_gh_hdr,
+                                json={
+                                    "message": (
+                                        f"Fix location: {chosen['name']} "
+                                        f"→ {_pend_lat},{_pend_lon}"
+                                    ),
+                                    "content": _new_content,
+                                    "sha":     _sha,
+                                },
+                                timeout=15,
+                            )
+                            if _put.status_code not in (200, 201):
+                                _errors.append(f"GitHub ({_put.status_code})")
                         except Exception as _gh_err:
-                            errors.append(f"GitHub ({_gh_err})")
+                            _errors.append(f"GitHub ({_gh_err})")
 
-                    # ── תוצאה ────────────────────────────────
-                    if not errors:
+                    # תוצאה
+                    if not _errors:
                         st.success(
-                            f"✅ עודכן בהצלחה!\n\n"
+                            f"✅ נשמר בהצלחה!\n\n"
                             f"📍 **{chosen['name']}**\n"
-                            f"🗺️ `{new_lat}, {new_lon}`\n"
-                            f"📮 {final_address or '—'}"
+                            f"🗺️ `{_pend_lat}, {_pend_lon}`\n"
+                            f"📮 {_final_addr or '—'}"
                         )
-                        st.session_state.pop("gps_lat", None)
-                        st.session_state.pop("gps_lon", None)
-                        st.session_state.pop(rg_key, None)
-                        get_stores.clear()
+                        for _k in ["_fix_pending_lat", "_fix_pending_lon",
+                                   "_fix_pending_addr", "_fix_last_click",
+                                   "_fix_search_query", "_fix_store_key"]:
+                            st.session_state.pop(_k, None)
+                        st.cache_data.clear()
                         st.balloons()
                     else:
-                        st.error(f"❌ שגיאה בעדכון: {', '.join(errors)}")
-            else:
-                st.caption("⬆️ לחץ על המפה או השתמש ב-GPS מהנייד")
+                        st.error(f"❌ שגיאה בעדכון: {', '.join(_errors)}")
 
-    except Exception as e:
-        st.error(f"שגיאה בטעינת מפת תיקון מיקום: {e}")
+            else:
+                st.caption(
+                    "⬆️ חפש כתובת בשדה למעלה, או לחץ ישירות על המפה, "
+                    "כדי להגדיר מיקום חדש"
+                )
+
+    except Exception as _tab7_err:
+        st.error(f"שגיאה בטעינת מפת תיקון מיקום: {_tab7_err}")
 
     # ════════════════════════════════════════════════════
     # Task 7 — ביקורת מיקומים + גיאוקודינג אוטומטי
