@@ -8,6 +8,6 @@ supabase
 googlemaps
 qrcode[pil]
 openpyxl
-openai
+openai>=1.14
 beautifulsoup4
-python-telegram-bot
+python-telegram-bot>=20.7
